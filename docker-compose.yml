@@ -1,0 +1,16 @@
+services:
+  packing-tracker:
+    build: .
+    image: packing-tracker:latest
+    container_name: packing-tracker
+    restart: unless-stopped
+    # Unraid's nobody:users. The data folder must be writable by this user.
+    user: "99:100"
+    ports:
+      - "5639:5639"
+    environment:
+      TRACKER_PASSWORD: ${TRACKER_PASSWORD:?Set TRACKER_PASSWORD in the .env file}
+      PORT: "5639"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${DATA_PATH:-/mnt/user/appdata/packing-tracker}:/data

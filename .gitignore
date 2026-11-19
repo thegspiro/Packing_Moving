@@ -1,0 +1,13 @@
+# Local settings and secrets
+.env
+
+# Box data (SQLite database and its journal files)
+data/
+*.db
+*.db-*
+
+# Python / editor clutter
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
