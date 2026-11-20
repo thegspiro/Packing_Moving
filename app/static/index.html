@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Packing Tracker</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --text: #1d2330;
+    --muted: #667085;
+    --border: #d0d5dd;
+    --accent: #2563eb;
+    --danger: #c0262d;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 1.3rem; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px; display: grid; gap: 20px; }
+  @media (min-width: 900px) { main { grid-template-columns: 360px 1fr; align-items: start; } }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 1.1rem; }
+  label { display: block; font-size: .85rem; font-weight: 600; margin: 10px 0 4px; }
+  input[type="text"], input[type="number"], input[type="search"], input[type="password"], textarea, select {
+    width: 100%;
+    padding: 8px;
+    font: inherit;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+  }
+  textarea { min-height: 140px; resize: vertical; }
+  .hint { font-size: .78rem; color: var(--muted); margin-top: 4px; }
+  .checkbox { display: flex; gap: 6px; align-items: center; font-weight: 600; font-size: .9rem; margin-top: 12px; }
+  .checkbox input { width: auto; }
+  .checks { display: flex; gap: 18px; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: #f0f2f5; }
+  button:disabled { opacity: .6; cursor: progress; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { background: #1d4fd8; }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button.small { padding: 4px 8px; font-size: .82rem; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .toolbar { display: grid; gap: 8px; margin-bottom: 12px; }
+  @media (min-width: 600px) { .toolbar { grid-template-columns: 2fr 1fr 1fr; } }
+  .bulk { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; font-size: .9rem; }
+  .bulk input[type="text"] { width: 180px; flex: 0 1 auto; }
+  .stats { font-size: .85rem; color: var(--muted); margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: .78rem; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
+  td.num { font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
+  td.contents { max-width: 320px; }
+  td.btns { white-space: nowrap; text-align: right; }
+  td.btns button { margin-left: 4px; }
+  .muted { color: var(--muted); }
+  .tag {
+    display: inline-block; font-size: .7rem; font-weight: 700;
+    padding: 1px 6px; border-radius: 4px; background: #fde2e1; color: var(--danger);
+    margin: 2px 0 0 4px; vertical-align: middle;
+  }
+  .tag.first { background: #dbeafe; color: #1e40af; }
+  .empty { text-align: center; color: var(--muted); padding: 30px 0; }
+  .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  #importFile { display: none; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  #loginView { max-width: 360px; margin: 80px auto; }
+  .error { color: var(--danger); font-size: .88rem; margin-top: 10px; }
+  .status { font-size: .85rem; color: var(--danger); }
+
+  /* ---------- Labels (only visible when printing) ---------- */
+  #printArea { display: none; }
+  #printArea.measuring { display: block; position: absolute; left: -10000px; top: 0; }
+  .label {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: #000;
+    font-family: Arial, Helvetica, sans-serif;
+    page-break-after: always;
+    break-after: page;
+  }
+  .label:last-child { page-break-after: auto; break-after: auto; }
+  .label .lbl-room, .label .lbl-location { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .label .lbl-room { font-weight: 900; text-transform: uppercase; }
+  .label .lbl-location { font-weight: 700; }
+  .label .lbl-number { font-weight: 900; line-height: 1; white-space: nowrap; }
+  .label .lbl-banner { background: #000; color: #fff; text-align: center; font-weight: 900; letter-spacing: .1em; }
+  .label .lbl-badges { display: flex; gap: 4px; }
+  .label .lbl-badges span { background: #000; color: #fff; font-weight: 900; letter-spacing: .05em; padding: 0 3px; white-space: nowrap; }
+  .label ul { padding-left: 1.1em; flex: 1 1 auto; overflow: hidden; }
+  .label ul.two-col { columns: 2; }
+  .label li { break-inside: avoid; overflow-wrap: anywhere; }
+
+  /* 4 x 6 in, portrait */
+  .label.size-4x6 { width: 4in; height: 6in; padding: 0.2in; }
+  .size-4x6 .lbl-title { font-size: 18pt; font-weight: 700; letter-spacing: .15em; text-align: center; }
+  .size-4x6 .lbl-number { font-size: 100pt; text-align: center; }
+  .size-4x6 .lbl-room { font-size: 28pt; text-align: center; border-top: 4px solid #000; padding-top: 4px; }
+  .size-4x6 .lbl-location { font-size: 11pt; text-align: center; margin-top: 2px; }
+  .size-4x6 .lbl-location.main { font-size: 18pt; border-top: 4px solid #000; padding-top: 6px; }
+  .size-4x6 .lbl-banner { margin-top: 6px; font-size: 20pt; padding: 1px 0; }
+  .size-4x6 .lbl-heading {
+    margin-top: 8px; font-size: 10pt; font-weight: 700; text-transform: uppercase;
+    border-bottom: 1px solid #000; padding-bottom: 2px;
+  }
+  .size-4x6 ul { margin: 4px 0 0; }
+  .size-4x6 ul.two-col { column-gap: 0.25in; }
+  .size-4x6 .lbl-notes { font-size: 10pt; margin-top: 6px; overflow-wrap: anywhere; max-height: 0.6in; overflow: hidden; }
+
+  /* 3 x 2 in, landscape */
+  .label.size-3x2 { width: 3in; height: 2in; padding: 0.1in; }
+  .size-3x2 .lbl-head { display: flex; align-items: center; gap: 0.1in; border-bottom: 2px solid #000; padding-bottom: 3px; }
+  .size-3x2 .lbl-number { font-size: 44pt; }
+  .size-3x2 .lbl-number.long { font-size: 34pt; }
+  .size-3x2 .lbl-side { flex: 1 1 auto; min-width: 0; }
+  .size-3x2 .lbl-title { font-size: 7pt; font-weight: 700; letter-spacing: .15em; }
+  .size-3x2 .lbl-room { font-size: 15pt; }
+  .size-3x2 .lbl-location { font-size: 8pt; }
+  .size-3x2 .lbl-location.main { font-size: 13pt; }
+  .size-3x2 .lbl-badges { margin-top: 2px; font-size: 7pt; }
+  .size-3x2 ul { margin: 4px 0 0; font-size: 10pt; line-height: 1.25; }
+  .size-3x2 ul.two-col { column-gap: 0.15in; }
+
+  /* 2 x 1 in, landscape */
+  .label.size-2x1 { width: 2in; height: 1in; padding: 0.04in 0.08in; justify-content: center; align-items: center; text-align: center; }
+  .size-2x1 .lbl-number { font-size: 30pt; }
+  .size-2x1 .lbl-room, .size-2x1 .lbl-location { max-width: 100%; }
+  .size-2x1 .lbl-room { font-size: 10pt; margin-top: 1px; }
+  .size-2x1 .lbl-location { font-size: 6.5pt; }
+  .size-2x1 .lbl-location.main { font-size: 9pt; margin-top: 1px; }
+  .size-2x1 .lbl-badges { margin-top: 1px; font-size: 6pt; }
+
+  /* Label size picker */
+  dialog#sizeDialog { border: 1px solid var(--border); border-radius: 8px; padding: 18px; max-width: 340px; }
+  dialog#sizeDialog::backdrop { background: rgba(0, 0, 0, .35); }
+  dialog#sizeDialog h3 { margin: 0 0 10px; font-size: 1.05rem; }
+  dialog#sizeDialog .size-option { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-weight: 400; }
+  dialog#sizeDialog .size-option input { margin-top: 3px; }
+  dialog#sizeDialog input[type="number"] { width: 80px; }
+
+  @media print {
+    html, body { background: #fff; margin: 0; padding: 0; }
+    dialog { display: none !important; }
+    header, main, #loginView { display: none !important; }
+    #printArea { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<section class="card" id="loginView" hidden aria-labelledby="loginTitle">
+  <h2 id="loginTitle">Packing Tracker</h2>
+  <form id="loginForm" autocomplete="on">
+    <label for="loginPassword">Password</label>
+    <input type="password" id="loginPassword" autocomplete="current-password" required>
+    <div class="actions"><button type="submit" class="primary" id="loginBtn">Sign in</button></div>
+    <div class="error" id="loginError" role="alert"></div>
+  </form>
+</section>
+
+<header id="appHeader" hidden>
+  <h1>Packing Tracker</h1>
+  <div class="header-actions">
+    <span class="status" id="statusMsg" role="status"></span>
+    <button type="button" id="refreshBtn">Refresh</button>
+    <button type="button" id="exportBtn">Export backup</button>
+    <button type="button" id="importBtn">Import backup</button>
+    <input type="file" id="importFile" accept="application/json,.json">
+    <button type="button" id="logoutBtn">Sign out</button>
+  </div>
+</header>
+
+<main id="appMain" hidden>
+  <section class="card" aria-labelledby="formTitle">
+    <h2 id="formTitle">Add box</h2>
+    <form id="boxForm" autocomplete="off">
+      <input type="hidden" id="boxId">
+      <input type="hidden" id="boxRev">
+      <label for="boxNumber">Box number</label>
+      <input type="number" id="boxNumber" min="1" max="999999" step="1" required>
+      <div class="hint">Auto-filled with the next number. Must be unique.</div>
+
+      <label for="boxRoom">Destination room (optional)</label>
+      <input type="text" id="boxRoom" list="roomList" maxlength="60" placeholder="e.g. Kitchen">
+      <datalist id="roomList"></datalist>
+      <div class="hint">Printed large on the label.</div>
+
+      <label for="boxLocation">Current location</label>
+      <input type="text" id="boxLocation" list="locationList" maxlength="60" required
+             placeholder="e.g. Old apartment">
+      <datalist id="locationList"></datalist>
+
+      <label for="boxContents">Contents (one item per line)</label>
+      <textarea id="boxContents" maxlength="5000" placeholder="Plates&#10;Coffee mugs&#10;Dish towels"></textarea>
+
+      <label for="boxNotes">Notes (optional)</label>
+      <input type="text" id="boxNotes" maxlength="200" placeholder="e.g. Heavy">
+
+      <div class="checks">
+        <label class="checkbox"><input type="checkbox" id="boxFragile"> Fragile</label>
+        <label class="checkbox"><input type="checkbox" id="boxOpenFirst"> Open first</label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="primary" id="saveBtn">Add box</button>
+        <button type="button" id="saveAndPrintBtn">Save &amp; print label</button>
+        <button type="button" id="cancelEditBtn" hidden>Cancel edit</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="listTitle">
+    <h2 id="listTitle">Boxes</h2>
+    <div class="toolbar">
+      <input type="search" id="searchInput" placeholder="Search box number, contents, notes…" aria-label="Search">
+      <select id="roomFilter" aria-label="Filter by room"></select>
+      <select id="locationFilter" aria-label="Filter by location"></select>
+    </div>
+    <div class="bulk">
+      <label class="checkbox" style="margin:0"><input type="checkbox" id="selectAll"> Select all shown</label>
+      <button type="button" class="small" id="printSelectedBtn">Print selected labels</button>
+      <span>Move selected to:</span>
+      <input type="text" id="bulkLocation" list="locationList" maxlength="60" placeholder="e.g. Truck" aria-label="New location">
+      <button type="button" class="small" id="bulkMoveBtn">Move</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col"><span class="visually-hidden">Select</span></th>
+          <th scope="col">Box</th>
+          <th scope="col">Room</th>
+          <th scope="col">Location</th>
+          <th scope="col">Contents</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody id="boxTable"></tbody>
+    </table>
+    <div class="empty" id="emptyMsg" hidden>No boxes match.</div>
+  </section>
+</main>
+
+<div id="printArea" aria-hidden="true"></div>
+
+<dialog id="sizeDialog" aria-labelledby="sizeDialogTitle">
+  <form method="dialog" id="sizeForm">
+    <h3 id="sizeDialogTitle">Label size</h3>
+    <div class="hint" id="sizeDialogCount"></div>
+    <label class="size-option"><input type="radio" name="labelSize" value="4x6">
+      <span><strong>4" x 6"</strong><br><span class="hint">Number, room, location, full contents, notes</span></span></label>
+    <label class="size-option"><input type="radio" name="labelSize" value="3x2">
+      <span><strong>3" x 2"</strong><br><span class="hint">Number, room, location, first few items</span></span></label>
+    <label class="size-option"><input type="radio" name="labelSize" value="2x1">
+      <span><strong>2" x 1"</strong><br><span class="hint">Number, room, location</span></span></label>
+    <label for="labelCopies">Copies of each label</label>
+    <input type="number" id="labelCopies" min="1" max="4" step="1" value="2">
+    <div class="hint">2 copies lets you label two sides of each box.</div>
+    <div class="hint">In the print window, set the paper size to match, margins to None and scale to 100%.</div>
+    <div class="actions">
+      <button type="submit" class="primary" value="print">Print</button>
+      <button type="submit" value="cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<style id="pageSizeStyle"></style>
+
+<script>
+(function () {
+  "use strict";
+
+  var DEFAULT_LOCATIONS = ["Old apartment", "Truck", "Storage unit", "New apartment"];
+  var DEFAULT_ROOMS = ["Bathroom", "Bedroom", "Closet", "Dining room", "Kitchen", "Living room", "Office"];
+  var MAX_LOCATION = 60, MAX_ROOM = 60, MAX_ITEM = 200, MAX_ITEMS = 300, MAX_NOTES = 200;
+  var LEGACY_STORAGE_KEY = "packingTracker.v1";
+  var MIGRATION_DONE_KEY = "packingTracker.copiedToServer";
+  var SIZE_KEY = "packingTracker.labelSize";
+  var COPIES_KEY = "packingTracker.labelCopies";
+  var NO_ROOM = "\u0000none";
+
+  var boxes = [];
+  var authenticated = false;
+  var numberIsAuto = true; // false once the user types their own box number
+
+  // ---------- Helpers ----------
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, opts) {
+    var node = document.createElement(tag);
+    if (opts) {
+      if (opts.className) node.className = opts.className;
+      if (opts.text != null) node.textContent = String(opts.text);
+      if (opts.type) node.type = opts.type;
+    }
+    return node;
+  }
+
+  function cleanString(value, maxLen) {
+    if (typeof value !== "string") return "";
+    return value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, maxLen);
+  }
+
+  function prefGet(key) {
+    try { return window.localStorage.getItem(key); } catch (err) { return null; }
+  }
+
+  function prefSet(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (err) {
+      console.error("Packing Tracker: could not save preference", key, err);
+    }
+  }
+
+  function setStatus(msg) { $("statusMsg").textContent = msg || ""; }
+
+  // ---------- Server API ----------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message;
+  }
+
+  function api(method, path, body) {
+    var opts = {
+      method: method,
+      credentials: "same-origin",
+      headers: { "X-Requested-With": "packing-tracker" }
+    };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function (res) {
+      return res.text().then(function (text) {
+        var data = {};
+        if (text) {
+          try { data = JSON.parse(text); } catch (err) { data = {}; }
+        }
+        if (res.status === 401 && path !== "/api/login") showLogin();
+        if (!res.ok) throw new ApiError(res.status, data.error || ("Request failed (" + res.status + ")"));
+        return data;
+      });
+    }, function () {
+      throw new ApiError(0, "Can't reach the server. Check that the container is running.");
+    });
+  }
+
+  function reportError(err) {
+    if (err && err.status === 401) return;
+    console.error("Packing Tracker:", err);
+    alert(err && err.message ? err.message : "Something went wrong.");
+  }
+
+  function loadBoxes() {
+    return api("GET", "/api/boxes").then(function (data) {
+      boxes = Array.isArray(data.boxes) ? data.boxes : [];
+      setStatus("");
+      render();
+    });
+  }
+
+  // ---------- Login ----------
+  function showLogin() {
+    authenticated = false;
+    $("appHeader").hidden = true;
+    $("appMain").hidden = true;
+    $("loginView").hidden = false;
+    $("loginPassword").value = "";
+    $("loginPassword").focus();
+  }
+
+  function showApp() {
+    authenticated = true;
+    $("loginView").hidden = true;
+    $("appHeader").hidden = false;
+    $("appMain").hidden = false;
+    resetForm();
+    loadBoxes().then(offerLegacyCopy).catch(reportError);
+  }
+
+  $("loginForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    $("loginError").textContent = "";
+    $("loginBtn").disabled = true;
+    api("POST", "/api/login", { password: $("loginPassword").value })
+      .then(showApp)
+      .catch(function (err) { $("loginError").textContent = err.message; })
+      .then(function () { $("loginBtn").disabled = false; });
+  });
+
+  $("logoutBtn").addEventListener("click", function () {
+    api("POST", "/api/logout").catch(function () {}).then(function () {
+      boxes = [];
+      render();
+      showLogin();
+    });
+  });
+
+  // ---------- Copy boxes saved by the older browser-only version ----------
+  function offerLegacyCopy() {
+    if (boxes.length || prefGet(MIGRATION_DONE_KEY)) return;
+    var legacy;
+    try {
+      var text = prefGet(LEGACY_STORAGE_KEY);
+      legacy = text ? JSON.parse(text) : null;
+    } catch (err) {
+      console.error("Packing Tracker: could not read boxes saved in this browser", err);
+      return;
+    }
+    if (!legacy || !Array.isArray(legacy.boxes) || !legacy.boxes.length) return;
+    if (!confirm("This browser has " + legacy.boxes.length + " box(es) saved from the older version " +
+                 "of Packing Tracker. Copy them to the server?")) {
+      prefSet(MIGRATION_DONE_KEY, "declined");
+      return;
+    }
+    api("POST", "/api/import", { boxes: legacy.boxes })
+      .then(function (res) {
+        prefSet(MIGRATION_DONE_KEY, new Date().toISOString());
+        alert("Copied " + res.imported + " box(es) to the server." +
+              (res.skipped ? " " + res.skipped + " invalid or duplicate box(es) were skipped." : ""));
+        return loadBoxes();
+      })
+      .catch(reportError);
+  }
+
+  // ---------- Form ----------
+  function nextNumber() {
+    return boxes.reduce(function (max, b) { return Math.max(max, b.number); }, 0) + 1;
+  }
+
+  function findBox(id) {
+    for (var i = 0; i < boxes.length; i++) if (boxes[i].id === id) return boxes[i];
+    return null;
+  }
+
+  function resetForm() {
+    $("boxForm").reset();
+    $("boxId").value = "";
+    $("boxRev").value = "";
+    $("boxNumber").value = nextNumber();
+    numberIsAuto = true;
+    $("formTitle").textContent = "Add box";
+    $("saveBtn").textContent = "Add box";
+    $("cancelEditBtn").hidden = true;
+  }
+
+  function startEdit(id) {
+    var box = findBox(id);
+    if (!box) return;
+    $("boxId").value = box.id;
+    $("boxRev").value = box.rev;
+    $("boxNumber").value = box.number;
+    $("boxRoom").value = box.room;
+    $("boxLocation").value = box.location;
+    $("boxContents").value = box.contents.join("\n");
+    $("boxNotes").value = box.notes;
+    $("boxFragile").checked = box.fragile;
+    $("boxOpenFirst").checked = box.openFirst;
+    $("formTitle").textContent = "Edit box " + box.number;
+    $("saveBtn").textContent = "Save changes";
+    $("cancelEditBtn").hidden = false;
+    $("boxContents").focus();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  // Resolves to the saved box, or null if validation failed locally.
+  function submitForm() {
+    var id = $("boxId").value;
+    var number = Number($("boxNumber").value);
+    if (!Number.isInteger(number) || number < 1 || number > 999999) {
+      alert("Box number must be a whole number between 1 and 999999.");
+      return Promise.resolve(null);
+    }
+    var location = cleanString($("boxLocation").value, MAX_LOCATION);
+    if (!location) {
+      alert("Please enter a current location.");
+      return Promise.resolve(null);
+    }
+    var contents = $("boxContents").value.split(/\r?\n/)
+      .map(function (c) { return cleanString(c, MAX_ITEM); })
+      .filter(function (c) { return c.length > 0; });
+    if (contents.length > MAX_ITEMS) {
+      alert("A box can list at most " + MAX_ITEMS + " items.");
+      return Promise.resolve(null);
+    }
+    var payload = {
+      number: number,
+      room: cleanString($("boxRoom").value, MAX_ROOM),
+      location: location,
+      contents: contents,
+      notes: cleanString($("boxNotes").value, MAX_NOTES),
+      fragile: $("boxFragile").checked,
+      openFirst: $("boxOpenFirst").checked
+    };
+    var request;
+    if (id) {
+      payload.rev = Number($("boxRev").value);
+      request = api("PUT", "/api/boxes/" + encodeURIComponent(id), payload);
+    } else {
+      request = api("POST", "/api/boxes", payload);
+    }
+    $("saveBtn").disabled = true;
+    $("saveAndPrintBtn").disabled = true;
+    return request
+      .then(function (res) {
+        return loadBoxes().then(function () {
+          resetForm();
+          return res.box;
+        });
+      })
+      .catch(function (err) {
+        reportError(err);
+        if (err.status === 409 || err.status === 404) loadBoxes().catch(reportError);
+        return null;
+      })
+      .then(function (box) {
+        $("saveBtn").disabled = false;
+        $("saveAndPrintBtn").disabled = false;
+        return box;
+      });
+  }
+
+  // ---------- List rendering ----------
+  function uniqueSorted(values) {
+    var set = {};
+    values.forEach(function (v) { if (v) set[v] = true; });
+    return Object.keys(set).sort(function (a, b) { return a.localeCompare(b); });
+  }
+
+  function allLocations() {
+    return uniqueSorted(DEFAULT_LOCATIONS.concat(boxes.map(function (b) { return b.location; })));
+  }
+
+  function usedRooms() {
+    return uniqueSorted(boxes.map(function (b) { return b.room; }));
+  }
+
+  function fillDatalist(listId, values) {
+    var dl = $(listId);
+    dl.textContent = "";
+    values.forEach(function (v) {
+      var opt = document.createElement("option");
+      opt.value = v;
+      dl.appendChild(opt);
+    });
+  }
+
+  function fillFilter(selectId, allLabel, options) {
+    var select = $(selectId);
+    var current = select.value;
+    select.textContent = "";
+    var all = document.createElement("option");
+    all.value = "";
+    all.textContent = allLabel;
+    select.appendChild(all);
+    var values = [""];
+    options.forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      select.appendChild(opt);
+      values.push(o.value);
+    });
+    select.value = values.indexOf(current) !== -1 ? current : "";
+  }
+
+  function countWhere(pred) { return boxes.filter(pred).length; }
+
+  function renderFilters() {
+    var locations = allLocations();
+    fillDatalist("locationList", locations);
+    fillDatalist("roomList", uniqueSorted(DEFAULT_ROOMS.concat(usedRooms())));
+
+    fillFilter("locationFilter", "All locations", locations.map(function (l) {
+      return { value: l, label: l + " (" + countWhere(function (b) { return b.location === l; }) + ")" };
+    }));
+
+    var roomOptions = usedRooms().map(function (r) {
+      return { value: r, label: r + " (" + countWhere(function (b) { return b.room === r; }) + ")" };
+    });
+    var noRoom = countWhere(function (b) { return !b.room; });
+    if (noRoom) roomOptions.push({ value: NO_ROOM, label: "No room set (" + noRoom + ")" });
+    fillFilter("roomFilter", "All rooms", roomOptions);
+  }
+
+  function filteredBoxes() {
+    var q = $("searchInput").value.trim().toLowerCase();
+    var loc = $("locationFilter").value;
+    var room = $("roomFilter").value;
+    return boxes.filter(function (b) {
+      if (loc && b.location !== loc) return false;
+      if (room === NO_ROOM && b.room) return false;
+      if (room && room !== NO_ROOM && b.room !== room) return false;
+      if (!q) return true;
+      var hay = [String(b.number), b.location, b.room, b.notes].concat(b.contents).join("\n").toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+  }
+
+  function render() {
+    renderFilters();
+    var shown = filteredBoxes();
+    var tbody = $("boxTable");
+    tbody.textContent = "";
+
+    shown.forEach(function (b) {
+      var tr = el("tr");
+
+      var tdSel = el("td");
+      var cb = el("input", { type: "checkbox", className: "row-select" });
+      cb.value = b.id;
+      cb.setAttribute("aria-label", "Select box " + b.number);
+      tdSel.appendChild(cb);
+      tr.appendChild(tdSel);
+
+      var tdNum = el("td", { className: "num", text: "#" + b.number });
+      if (b.fragile) tdNum.appendChild(el("span", { className: "tag", text: "FRAGILE" }));
+      if (b.openFirst) tdNum.appendChild(el("span", { className: "tag first", text: "OPEN FIRST" }));
+      tr.appendChild(tdNum);
+
+      tr.appendChild(b.room ? el("td", { text: b.room }) : el("td", { className: "muted", text: "—" }));
+      tr.appendChild(el("td", { text: b.location }));
+
+      var tdContents = el("td", { className: "contents" });
+      var preview = b.contents.slice(0, 12).join(", ");
+      if (b.contents.length > 12) preview += ", … +" + (b.contents.length - 12) + " more";
+      tdContents.textContent = b.contents.length ? preview : "(empty)";
+      if (b.notes) tdContents.appendChild(el("div", { className: "hint", text: "Note: " + b.notes }));
+      tr.appendChild(tdContents);
+
+      var tdBtns = el("td", { className: "btns" });
+      var printBtn = el("button", { type: "button", className: "small", text: "Print" });
+      printBtn.addEventListener("click", function () { printLabels([b]); });
+      var editBtn = el("button", { type: "button", className: "small", text: "Edit" });
+      editBtn.addEventListener("click", function () { startEdit(b.id); });
+      var delBtn = el("button", { type: "button", className: "small danger", text: "Delete" });
+      delBtn.addEventListener("click", function () { deleteBox(b.id); });
+      tdBtns.appendChild(printBtn);
+      tdBtns.appendChild(editBtn);
+      tdBtns.appendChild(delBtn);
+      tr.appendChild(tdBtns);
+
+      tbody.appendChild(tr);
+    });
+
+    $("emptyMsg").hidden = shown.length > 0;
+    $("emptyMsg").textContent = boxes.length ? "No boxes match." : "No boxes yet. Add your first box on the left.";
+    $("selectAll").checked = false;
+
+    var itemCount = boxes.reduce(function (s, b) { return s + b.contents.length; }, 0);
+    $("stats").textContent = boxes.length + " box(es), " + itemCount + " item(s) total" +
+      (shown.length !== boxes.length ? " — showing " + shown.length : "");
+
+    if (!$("boxId").value && numberIsAuto) $("boxNumber").value = nextNumber();
+  }
+
+  function selectedIds() {
+    var ids = [];
+    document.querySelectorAll(".row-select:checked").forEach(function (cb) { ids.push(cb.value); });
+    return ids;
+  }
+
+  function deleteBox(id) {
+    var box = findBox(id);
+    if (!box) return;
+    if (!confirm("Delete box " + box.number + "? This cannot be undone.")) return;
+    api("DELETE", "/api/boxes/" + encodeURIComponent(id))
+      .catch(function (err) { if (err.status !== 404) throw err; })
+      .then(function () {
+        if ($("boxId").value === id) resetForm();
+        return loadBoxes();
+      })
+      .catch(reportError);
+  }
+
+  // ---------- Labels ----------
+  var LABEL_SIZES = {
+    "4x6": { width: "4in", height: "6in", build: buildLabel4x6 },
+    "3x2": { width: "3in", height: "2in", build: buildLabel3x2 },
+    "2x1": { width: "2in", height: "1in", build: buildLabel2x1 }
+  };
+
+  function savedSize() {
+    var s = prefGet(SIZE_KEY);
+    return s && LABEL_SIZES.hasOwnProperty(s) ? s : "4x6";
+  }
+
+  function savedCopies() {
+    var n = Number(prefGet(COPIES_KEY));
+    return Number.isInteger(n) && n >= 1 && n <= 4 ? n : 2;
+  }
+
+  // Room large with location small; if no room is set, the location is shown as the main line.
+  function appendRoomAndLocation(parent, box) {
+    if (box.room) {
+      parent.appendChild(el("div", { className: "lbl-room", text: box.room }));
+      parent.appendChild(el("div", { className: "lbl-location", text: box.location }));
+    } else {
+      parent.appendChild(el("div", { className: "lbl-location main", text: box.location }));
+    }
+  }
+
+  function appendBadges(parent, box) {
+    if (!box.fragile && !box.openFirst) return;
+    var badges = el("div", { className: "lbl-badges" });
+    if (box.openFirst) badges.appendChild(el("span", { text: "OPEN FIRST" }));
+    if (box.fragile) badges.appendChild(el("span", { text: "FRAGILE" }));
+    parent.appendChild(badges);
+  }
+
+  // Font size / column steps tried, largest first, until the contents list fits its label.
+  var FIT_STEPS = {
+    "4x6": [[14, false], [12, false], [11, false], [10, true], [9, true], [8, true]],
+    "3x2": [[10, false], [10, true], [9, true], [8, true]]
+  };
+
+  // Contents are filled in by fitLabel() once the label can be measured.
+  function contentsList(box, maxItems) {
+    var ul = el("ul", { className: "lbl-contents" });
+    var total = box.contents.length;
+    ul.packItems = box.contents;
+    ul.packShown = total > maxItems ? maxItems - 1 : total;
+    return ul;
+  }
+
+  function fillList(ul, shown) {
+    var total = ul.packItems.length;
+    ul.textContent = "";
+    ul.packItems.slice(0, shown).forEach(function (item) { ul.appendChild(el("li", { text: item })); });
+    if (total > shown) ul.appendChild(el("li", { text: "+ " + (total - shown) + " more" }));
+    if (total === 0) ul.appendChild(el("li", { text: "(no contents listed)" }));
+  }
+
+  function overflows(ul) {
+    return ul.scrollHeight > ul.clientHeight + 1 || ul.scrollWidth > ul.clientWidth + 1;
+  }
+
+  // Shrink text, then use two columns, then cut the list short with "+ N more".
+  function fitLabel(label, steps) {
+    var ul = label.querySelector("ul.lbl-contents");
+    if (!ul || !steps) return;
+    var step;
+    for (var i = 0; i < steps.length; i++) {
+      step = steps[i];
+      ul.style.fontSize = step[0] + "pt";
+      ul.classList.toggle("two-col", step[1]);
+      fillList(ul, ul.packShown);
+      if (!overflows(ul)) return;
+    }
+    for (var n = ul.packShown - 1; n >= 0; n--) {
+      fillList(ul, n);
+      if (!overflows(ul)) return;
+    }
+  }
+
+  function buildLabel2x1(box) {
+    var label = el("div", { className: "label size-2x1" });
+    label.appendChild(el("div", { className: "lbl-number", text: box.number }));
+    appendRoomAndLocation(label, box);
+    appendBadges(label, box);
+    return label;
+  }
+
+  function buildLabel3x2(box) {
+    var label = el("div", { className: "label size-3x2" });
+    var head = el("div", { className: "lbl-head" });
+    head.appendChild(el("div", { className: "lbl-number" + (String(box.number).length >= 4 ? " long" : ""), text: box.number }));
+    var side = el("div", { className: "lbl-side" });
+    side.appendChild(el("div", { className: "lbl-title", text: "BOX" }));
+    appendRoomAndLocation(side, box);
+    appendBadges(side, box);
+    head.appendChild(side);
+    label.appendChild(head);
+
+    label.appendChild(contentsList(box, 6));
+    return label;
+  }
+
+  function buildLabel4x6(box) {
+    var label = el("div", { className: "label size-4x6" });
+    label.appendChild(el("div", { className: "lbl-title", text: "BOX" }));
+    label.appendChild(el("div", { className: "lbl-number", text: box.number }));
+    appendRoomAndLocation(label, box);
+    if (box.openFirst) label.appendChild(el("div", { className: "lbl-banner", text: "OPEN FIRST" }));
+    if (box.fragile) label.appendChild(el("div", { className: "lbl-banner", text: "FRAGILE" }));
+
+    label.appendChild(el("div", { className: "lbl-heading", text: "Contents (" + box.contents.length + ")" }));
+
+    label.appendChild(contentsList(box, MAX_ITEMS));
+
+    if (box.notes) label.appendChild(el("div", { className: "lbl-notes", text: "Note: " + box.notes }));
+    return label;
+  }
+
+  function printAtSize(list, sizeKey, copies) {
+    var size = LABEL_SIZES[sizeKey];
+    if (!size) return;
+    prefSet(SIZE_KEY, sizeKey);
+    prefSet(COPIES_KEY, String(copies));
+    $("pageSizeStyle").textContent =
+      "@media print { @page { size: " + size.width + " " + size.height + "; margin: 0; } }";
+    var area = $("printArea");
+    area.textContent = "";
+    list
+      .slice()
+      .sort(function (a, b) { return a.number - b.number; })
+      .forEach(function (b) {
+        var label = size.build(b);
+        area.appendChild(label);
+        for (var i = 1; i < copies; i++) area.appendChild(label.cloneNode(true));
+      });
+    // Lay the labels out off-screen so each contents list can be measured and fitted.
+    area.classList.add("measuring");
+    var labels = area.querySelectorAll(".label");
+    for (var i = 0; i < labels.length; i += copies) {
+      fitLabel(labels[i], FIT_STEPS[sizeKey]);
+      for (var c = 1; c < copies; c++) {
+        labels[i + c].parentNode.replaceChild(labels[i].cloneNode(true), labels[i + c]);
+      }
+    }
+    area.classList.remove("measuring");
+    window.print();
+  }
+
+  var pendingPrint = [];
+
+  // Ask for the label size and copies every time, pre-selecting the last choices.
+  function printLabels(list) {
+    if (!list.length) {
+      alert("Select at least one box to print.");
+      return;
+    }
+    var dialog = $("sizeDialog");
+    if (typeof dialog.showModal !== "function") {
+      printAtSize(list, savedSize(), savedCopies());
+      return;
+    }
+    pendingPrint = list;
+    var current = savedSize();
+    document.querySelectorAll('input[name="labelSize"]').forEach(function (r) {
+      r.checked = r.value === current;
+    });
+    $("labelCopies").value = savedCopies();
+    $("sizeDialogCount").textContent = list.length === 1
+      ? "Printing label for box " + list[0].number
+      : "Printing labels for " + list.length + " boxes";
+    dialog.returnValue = "";
+    dialog.showModal();
+  }
+
+  $("sizeDialog").addEventListener("close", function () {
+    var dialog = $("sizeDialog");
+    var list = pendingPrint;
+    pendingPrint = [];
+    if (dialog.returnValue !== "print" || !list.length) return;
+    var picked = document.querySelector('input[name="labelSize"]:checked');
+    var sizeKey = picked ? picked.value : savedSize();
+    var copies = Number($("labelCopies").value);
+    if (!Number.isInteger(copies) || copies < 1) copies = 1;
+    if (copies > 4) copies = 4;
+    // Let the dialog finish closing before the print window opens.
+    setTimeout(function () { printAtSize(list, sizeKey, copies); }, 50);
+  });
+
+  window.addEventListener("afterprint", function () { $("printArea").textContent = ""; });
+
+  // ---------- Import / export ----------
+  function exportData() {
+    var a = document.createElement("a");
+    a.href = "/api/export";
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function importData(file) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      alert("That file is too large to be a Packing Tracker backup.");
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try {
+        data = JSON.parse(String(reader.result));
+      } catch (err) {
+        alert("Import failed: that file is not valid JSON.");
+        return;
+      }
+      if (!data || !Array.isArray(data.boxes)) {
+        alert("Import failed: file does not look like a Packing Tracker backup.");
+        return;
+      }
+      if (!confirm("Replace all " + boxes.length + " box(es) on the server with " +
+                   data.boxes.length + " box(es) from this file? Everyone using the tracker will see the change.")) return;
+      api("POST", "/api/import", { boxes: data.boxes })
+        .then(function (res) {
+          resetForm();
+          alert("Imported " + res.imported + " box(es)." +
+                (res.skipped ? " " + res.skipped + " invalid or duplicate box(es) were skipped." : ""));
+          return loadBoxes();
+        })
+        .catch(reportError);
+    };
+    reader.onerror = function () { alert("Could not read that file."); };
+    reader.readAsText(file);
+  }
+
+  // ---------- Wire up ----------
+  $("boxForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    submitForm();
+  });
+  $("saveAndPrintBtn").addEventListener("click", function () {
+    if (!$("boxForm").reportValidity()) return;
+    submitForm().then(function (box) { if (box) printLabels([box]); });
+  });
+  $("cancelEditBtn").addEventListener("click", resetForm);
+  $("boxNumber").addEventListener("input", function () { numberIsAuto = false; });
+  $("searchInput").addEventListener("input", render);
+  $("locationFilter").addEventListener("change", render);
+  $("roomFilter").addEventListener("change", render);
+  $("selectAll").addEventListener("change", function (e) {
+    var checked = e.target.checked;
+    document.querySelectorAll(".row-select").forEach(function (cb) { cb.checked = checked; });
+  });
+  $("printSelectedBtn").addEventListener("click", function () {
+    printLabels(selectedIds().map(findBox).filter(Boolean));
+  });
+  $("bulkMoveBtn").addEventListener("click", function () {
+    var ids = selectedIds();
+    var loc = cleanString($("bulkLocation").value, MAX_LOCATION);
+    if (!ids.length) { alert("Select at least one box to move."); return; }
+    if (!loc) { alert("Enter the location to move the boxes to."); return; }
+    api("POST", "/api/boxes/move", { ids: ids, location: loc })
+      .then(function () {
+        $("bulkLocation").value = "";
+        return loadBoxes();
+      })
+      .catch(reportError);
+  });
+  $("refreshBtn").addEventListener("click", function () { loadBoxes().catch(reportError); });
+  $("exportBtn").addEventListener("click", exportData);
+  $("importBtn").addEventListener("click", function () { $("importFile").click(); });
+  $("importFile").addEventListener("change", function (e) {
+    importData(e.target.files[0]);
+    e.target.value = "";
+  });
+
+  // Pick up changes made on other devices when this tab comes back into view.
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && authenticated) {
+      loadBoxes().catch(function (err) {
+        if (err.status !== 401) setStatus(err.message);
+      });
+    }
+  });
+
+  api("GET", "/api/session")
+    .then(function (s) { if (s.authenticated) showApp(); else showLogin(); })
+    .catch(function (err) {
+      showLogin();
+      $("loginError").textContent = err.message;
+    });
+})();
+</script>
+</body>
+</html>
