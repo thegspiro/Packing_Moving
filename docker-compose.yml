@@ -12,5 +12,6 @@ services:
       TRACKER_PASSWORD: ${TRACKER_PASSWORD:?Set TRACKER_PASSWORD in the .env file}
       PORT: "5639"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PUBLIC_URL: ${PUBLIC_URL:-}
     volumes:
       - ${DATA_PATH:-/mnt/user/appdata/packing-tracker}:/data

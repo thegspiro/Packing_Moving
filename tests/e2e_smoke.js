@@ -130,6 +130,40 @@ function check(cond, msg) {
   check(true, 'second device sees the same 4 boxes');
   await page2.screenshot({ path: path.join(OUT_DIR, 'app.png') });
 
+  // Box view: opening a label's link shows the box and allows a one-tap move.
+  const ids = await page.evaluate(async () => (await (await fetch('/api/boxes')).json()).boxes
+    .reduce((m, b) => { m[b.number] = b.id; return m; }, {}));
+  await page.evaluate(id => { window.location.hash = 'box=' + id; }, ids[3]);
+  await page.waitForSelector('#boxDialog[open]');
+  check((await page.textContent('#bvTitle')) === 'Box 3', 'scan link opens the right box');
+  check((await page.textContent('#bvRoom')).includes('Kitchen'), 'box view shows the room');
+  await page.click('#bvMoveButtons button:has-text("Truck")');
+  await page.waitForFunction(() => document.getElementById('bvMoved').textContent.includes('Truck'));
+  check((await page.textContent('#bvLocation')) === 'Now at: Truck', 'one-tap move updates the box');
+  await page.fill('#bvMoveOther', 'Garage');
+  await page.click('#bvMoveOtherBtn');
+  await page.waitForFunction(() => document.getElementById('bvLocation').textContent === 'Now at: Garage');
+  check(true, 'move to a typed location works');
+  await page.click('#bvClose');
+  await page.waitForFunction(() => window.location.hash === '' && !document.getElementById('boxDialog').open,
+                             null, { timeout: 2000 });
+  check(true, 'closing the box view clears the link');
+
+  // A signed-out phone opening a scan link sees the box right after signing in.
+  const phone = await (await browser.newContext({ viewport: { width: 390, height: 844 } })).newPage();
+  await phone.goto(BASE_URL + '/#box=' + ids[1024]);
+  await phone.waitForSelector('#loginView:not([hidden])', { timeout: 5000 });
+  await phone.fill('#loginPassword', PASSWORD);
+  await phone.click('#loginBtn');
+  await phone.waitForSelector('#boxDialog[open]');
+  check((await phone.textContent('#bvTitle')) === 'Box 1024', 'scan link survives signing in on a phone');
+  await phone.screenshot({ path: path.join(OUT_DIR, 'phone-box-view.png') });
+
+  // Unknown box link.
+  await page.evaluate(() => { window.location.hash = 'box=no-such-box'; });
+  await page.waitForTimeout(200);
+  check(alerts.some(a => a.includes("isn't in the tracker anymore")), 'unknown box link explained');
+
   // Printing: size dialog, copies, page size and fit for each label size.
   await page.evaluate(() => { window.__prints = 0; window.print = () => { window.__prints++; }; });
   await page.check('#selectAll');
@@ -153,6 +187,16 @@ function check(cond, msg) {
     const [w, h] = size.split('x');
     check(info.css.includes(`size: ${w}in ${h}in`), `${size}: print page size set`);
     check(info.labels === 4 * copies, `${size}: ${copies} cop(ies) of 4 labels = ${info.labels}`);
+    const qr = await page.$$eval('#printArea .label', ls => ls.map(l => {
+      const q = l.querySelector('.lbl-qr');
+      return q ? { url: q.getAttribute('data-url'), svg: !!q.querySelector('svg path') } : null;
+    }));
+    if (size === '2x1') {
+      check(qr.every(q => q === null), `${size}: no QR code`);
+    } else {
+      check(qr.every(q => q && q.svg && /\/#box=[A-Za-z0-9-]+$/.test(q.url)), `${size}: every label has a QR code linking to its box`);
+      check(alerts.some(a => a.includes("which phones can't open")), `${size}: warned that localhost QR codes won't work on phones`);
+    }
     await page.emulateMedia({ media: 'print' });
     const overflow = await page.$$eval('#printArea .label', labels => labels.map(l => {
       const lr = l.getBoundingClientRect();

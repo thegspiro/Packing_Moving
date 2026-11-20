@@ -316,7 +316,72 @@ class PersistenceTests(unittest.TestCase):
                 server.Store(db)
 
 
+class PublicUrlTests(unittest.TestCase):
+    def test_valid_urls_are_normalised(self):
+        self.assertEqual(server.parse_public_url(""), "")
+        self.assertEqual(server.parse_public_url("  "), "")
+        self.assertEqual(server.parse_public_url("http://192.168.1.50:5639/"), "http://192.168.1.50:5639")
+        self.assertEqual(server.parse_public_url("https://tower.local"), "https://tower.local")
+        self.assertEqual(server.parse_public_url("http://tower:5639/tracker/"), "http://tower:5639/tracker")
+
+    def test_invalid_urls_rejected(self):
+        for bad in ["192.168.1.50:5639", "ftp://host", "javascript:alert(1)", "http://",
+                    "http://user:pw@host", "http://host/?x=1", "http://host/#box", "http://host:99999",
+                    "http://ho st", "http://host/\x00", "http://" + "a" * 300]:
+            with self.assertRaises(ValueError, msg=bad):
+                server.parse_public_url(bad)
+
+
+class QrSupportTests(ServerTestCase):
+    def test_qr_library_served_as_javascript(self):
+        res, _ = self.request("GET", "/qrcode.js")
+        self.assertEqual(res.status, 200)
+        self.assertIn("text/javascript", res.getheader("Content-Type"))
+
+    def test_only_listed_static_files_served(self):
+        for path in ["/THIRD_PARTY_LICENSES.md", "/server.py", "/../server.py", "/static/qrcode.js"]:
+            res, _ = self.request("GET", path)
+            self.assertEqual(res.status, 404, path)
+
+    def test_config_requires_login_and_defaults_to_empty(self):
+        res, _ = self.request("GET", "/api/config")
+        self.assertEqual(res.status, 401)
+        self.login()
+        res, data = self.request("GET", "/api/config")
+        self.assertEqual((res.status, data), (200, {"publicUrl": ""}))
+
+
+class QrConfiguredTests(ServerTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.httpd = server.make_server("127.0.0.1", 0, self.tmp.name, PASSWORD,
+                                        public_url="http://192.168.1.50:5639/")
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05},
+                                       daemon=True)
+        self.thread.start()
+        self.cookie = None
+
+    def test_config_returns_normalised_public_url(self):
+        self.login()
+        _, data = self.request("GET", "/api/config")
+        self.assertEqual(data, {"publicUrl": "http://192.168.1.50:5639"})
+
+
 class ConfigTests(unittest.TestCase):
+    def test_refuses_to_start_with_bad_public_url(self):
+        saved = {k: os.environ.get(k) for k in ("TRACKER_PASSWORD", "PUBLIC_URL")}
+        try:
+            os.environ["TRACKER_PASSWORD"] = PASSWORD
+            os.environ["PUBLIC_URL"] = "not-a-url"
+            self.assertEqual(server.main(), 2)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_refuses_to_start_without_password(self):
         old = os.environ.pop("TRACKER_PASSWORD", None)
         try:

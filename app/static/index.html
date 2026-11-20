@@ -139,7 +139,11 @@
   }
   .size-4x6 ul { margin: 4px 0 0; }
   .size-4x6 ul.two-col { column-gap: 0.25in; }
-  .size-4x6 .lbl-notes { font-size: 10pt; margin-top: 6px; overflow-wrap: anywhere; max-height: 0.6in; overflow: hidden; }
+  .size-4x6 .lbl-footer { display: flex; gap: 0.12in; align-items: flex-end; margin-top: 6px; }
+  .size-4x6 .lbl-footer-text { flex: 1 1 auto; min-width: 0; }
+  .size-4x6 .lbl-notes { font-size: 10pt; overflow-wrap: anywhere; max-height: 0.8in; overflow: hidden; }
+  .size-4x6 .lbl-scan { font-size: 8pt; margin-top: 4px; }
+  .size-4x6 .lbl-qr { width: 1.1in; height: 1.1in; flex: 0 0 auto; }
 
   /* 3 x 2 in, landscape */
   .label.size-3x2 { width: 3in; height: 2in; padding: 0.1in; }
@@ -152,7 +156,10 @@
   .size-3x2 .lbl-location { font-size: 8pt; }
   .size-3x2 .lbl-location.main { font-size: 13pt; }
   .size-3x2 .lbl-badges { margin-top: 2px; font-size: 7pt; }
-  .size-3x2 ul { margin: 4px 0 0; font-size: 10pt; line-height: 1.25; }
+  .size-3x2 .lbl-body { display: flex; flex: 1 1 auto; min-height: 0; gap: 0.08in; margin-top: 4px; }
+  .size-3x2 .lbl-body ul { min-width: 0; }
+  .size-3x2 .lbl-qr { width: 0.9in; height: 0.9in; flex: 0 0 auto; align-self: flex-end; }
+  .size-3x2 ul { margin: 0; font-size: 10pt; line-height: 1.25; }
   .size-3x2 ul.two-col { column-gap: 0.15in; }
 
   /* 2 x 1 in, landscape */
@@ -163,6 +170,31 @@
   .size-2x1 .lbl-location { font-size: 6.5pt; }
   .size-2x1 .lbl-location.main { font-size: 9pt; margin-top: 1px; }
   .size-2x1 .lbl-badges { margin-top: 1px; font-size: 6pt; }
+
+  .label .lbl-qr svg { display: block; width: 100%; height: 100%; }
+
+  /* Box view (opened by scanning a label) */
+  dialog#boxDialog {
+    border: 1px solid var(--border); border-radius: 10px; padding: 18px;
+    width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto;
+  }
+  dialog#boxDialog::backdrop { background: rgba(0, 0, 0, .35); }
+  #boxDialog h3 { margin: 0; font-size: 2rem; }
+  #boxDialog .bv-room { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+  #boxDialog .bv-location { font-size: 1.05rem; margin-top: 4px; }
+  #boxDialog .bv-section { margin-top: 16px; }
+  #boxDialog .bv-section h4 { margin: 0 0 6px; font-size: .8rem; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
+  #boxDialog .bv-move { display: flex; flex-wrap: wrap; gap: 8px; }
+  #boxDialog .bv-move button { padding: 12px 14px; font-size: 1rem; }
+  #boxDialog .bv-move-other { display: flex; gap: 8px; margin-top: 8px; }
+  #boxDialog ul { margin: 0; padding-left: 1.2em; font-size: 1.05rem; line-height: 1.5; }
+  #boxDialog .bv-moved { color: #067647; font-weight: 600; margin-top: 8px; min-height: 1.2em; }
+  #boxDialog .actions {
+    position: sticky; bottom: -18px; margin: 14px -18px -18px; padding: 12px 18px;
+    background: #fff; border-top: 1px solid var(--border);
+  }
+  #boxDialog .actions button { padding: 10px 14px; }
+  #boxDialog h3:focus { outline: none; }
 
   /* Label size picker */
   dialog#sizeDialog { border: 1px solid var(--border); border-radius: 8px; padding: 18px; max-width: 340px; }
@@ -298,7 +330,38 @@
   </form>
 </dialog>
 
+<dialog id="boxDialog" aria-labelledby="bvTitle">
+  <h3 id="bvTitle" tabindex="-1" autofocus></h3>
+  <div id="bvBadges"></div>
+  <div class="bv-room" id="bvRoom"></div>
+  <div class="bv-location" id="bvLocation"></div>
+  <div class="bv-section">
+    <h4>Move to</h4>
+    <div class="bv-move" id="bvMoveButtons"></div>
+    <div class="bv-move-other">
+      <input type="text" id="bvMoveOther" list="locationList" maxlength="60" placeholder="Other location" aria-label="Other location">
+      <button type="button" id="bvMoveOtherBtn">Move</button>
+    </div>
+    <div class="bv-moved" id="bvMoved" role="status"></div>
+  </div>
+  <div class="bv-section">
+    <h4 id="bvContentsTitle">Contents</h4>
+    <ul id="bvContents"></ul>
+  </div>
+  <div class="bv-section" id="bvNotesSection">
+    <h4>Notes</h4>
+    <div id="bvNotes"></div>
+  </div>
+  <div class="actions">
+    <button type="button" id="bvEdit">Edit</button>
+    <button type="button" id="bvPrint">Print label</button>
+    <button type="button" class="primary" id="bvClose">Close</button>
+  </div>
+</dialog>
+
 <style id="pageSizeStyle"></style>
+
+<script src="/qrcode.js"></script>
 
 <script>
 (function () {
@@ -314,7 +377,9 @@
   var NO_ROOM = "\u0000none";
 
   var boxes = [];
+  var boxesLoaded = false; // true once the box list has been fetched since signing in
   var authenticated = false;
+  var publicUrl = ""; // from the server's PUBLIC_URL setting; "" = use this page's address
   var numberIsAuto = true; // false once the user types their own box number
 
   // ---------- Helpers ----------
@@ -387,14 +452,17 @@
   function loadBoxes() {
     return api("GET", "/api/boxes").then(function (data) {
       boxes = Array.isArray(data.boxes) ? data.boxes : [];
+      boxesLoaded = true;
       setStatus("");
       render();
+      if (viewedBoxId) renderBoxView();
     });
   }
 
   // ---------- Login ----------
   function showLogin() {
     authenticated = false;
+    boxesLoaded = false;
     $("appHeader").hidden = true;
     $("appMain").hidden = true;
     $("loginView").hidden = false;
@@ -408,7 +476,15 @@
     $("appHeader").hidden = false;
     $("appMain").hidden = false;
     resetForm();
-    loadBoxes().then(offerLegacyCopy).catch(reportError);
+    api("GET", "/api/config")
+      .then(function (cfg) { publicUrl = typeof cfg.publicUrl === "string" ? cfg.publicUrl : ""; })
+      .catch(function (err) { console.error("Packing Tracker: could not load settings", err); })
+      .then(loadBoxes)
+      .then(function () {
+        offerLegacyCopy();
+        openBoxFromHash();
+      })
+      .catch(reportError);
   }
 
   $("loginForm").addEventListener("submit", function (e) {
@@ -662,6 +738,9 @@
       tr.appendChild(tdContents);
 
       var tdBtns = el("td", { className: "btns" });
+      var viewBtn = el("button", { type: "button", className: "small", text: "View" });
+      viewBtn.addEventListener("click", function () { showBoxView(b.id); });
+      tdBtns.appendChild(viewBtn);
       var printBtn = el("button", { type: "button", className: "small", text: "Print" });
       printBtn.addEventListener("click", function () { printLabels([b]); });
       var editBtn = el("button", { type: "button", className: "small", text: "Edit" });
@@ -741,6 +820,64 @@
     parent.appendChild(badges);
   }
 
+  // ---------- QR codes ----------
+  function qrBase() {
+    return publicUrl || window.location.origin;
+  }
+
+  // True when phones scanning the code could not reach the address (e.g. localhost).
+  function qrBaseIsLocal() {
+    var host;
+    try { host = new URL(qrBase()).hostname; } catch (err) { return true; }
+    return host === "localhost" || host === "::1" || host === "[::1]" ||
+      /^127\./.test(host) || host === "0.0.0.0" || /\.localhost$/.test(host);
+  }
+
+  function boxUrl(box) {
+    return qrBase() + "/#box=" + encodeURIComponent(box.id);
+  }
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  // Builds the QR code as an SVG path so it prints crisply at any size.
+  function qrElement(box) {
+    var wrap = el("div", { className: "lbl-qr" });
+    var url = boxUrl(box);
+    wrap.setAttribute("data-url", url);
+    if (typeof window.qrcode !== "function") {
+      console.error("Packing Tracker: QR library did not load");
+      return wrap;
+    }
+    var qr = window.qrcode(0, "M");
+    qr.addData(url);
+    qr.make();
+    var count = qr.getModuleCount();
+    var quiet = 2;
+    var d = [];
+    for (var r = 0; r < count; r++) {
+      for (var c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) d.push("M" + (c + quiet) + " " + (r + quiet) + "h1v1h-1z");
+      }
+    }
+    var size = count + quiet * 2;
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + size + " " + size);
+    svg.setAttribute("shape-rendering", "crispEdges");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "QR code for box " + box.number);
+    var bg = document.createElementNS(SVG_NS, "rect");
+    bg.setAttribute("width", size);
+    bg.setAttribute("height", size);
+    bg.setAttribute("fill", "#fff");
+    var path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d.join(""));
+    path.setAttribute("fill", "#000");
+    svg.appendChild(bg);
+    svg.appendChild(path);
+    wrap.appendChild(svg);
+    return wrap;
+  }
+
   // Font size / column steps tried, largest first, until the contents list fits its label.
   var FIT_STEPS = {
     "4x6": [[14, false], [12, false], [11, false], [10, true], [9, true], [8, true]],
@@ -805,7 +942,10 @@
     head.appendChild(side);
     label.appendChild(head);
 
-    label.appendChild(contentsList(box, 6));
+    var body = el("div", { className: "lbl-body" });
+    body.appendChild(contentsList(box, 6));
+    body.appendChild(qrElement(box));
+    label.appendChild(body);
     return label;
   }
 
@@ -821,7 +961,13 @@
 
     label.appendChild(contentsList(box, MAX_ITEMS));
 
-    if (box.notes) label.appendChild(el("div", { className: "lbl-notes", text: "Note: " + box.notes }));
+    var footer = el("div", { className: "lbl-footer" });
+    var text = el("div", { className: "lbl-footer-text" });
+    if (box.notes) text.appendChild(el("div", { className: "lbl-notes", text: "Note: " + box.notes }));
+    text.appendChild(el("div", { className: "lbl-scan", text: "Scan the code to see or update this box." }));
+    footer.appendChild(text);
+    footer.appendChild(qrElement(box));
+    label.appendChild(footer);
     return label;
   }
 
@@ -891,11 +1037,133 @@
     var copies = Number($("labelCopies").value);
     if (!Number.isInteger(copies) || copies < 1) copies = 1;
     if (copies > 4) copies = 4;
+    if (sizeKey !== "2x1" && qrBaseIsLocal() &&
+        !confirm("The QR codes will point to " + qrBase() + ", which phones can't open. " +
+                 "Set PUBLIC_URL in the container settings, or open the tracker using the " +
+                 "server's network address. Print anyway?")) return;
     // Let the dialog finish closing before the print window opens.
     setTimeout(function () { printAtSize(list, sizeKey, copies); }, 50);
   });
 
   window.addEventListener("afterprint", function () { $("printArea").textContent = ""; });
+
+  // ---------- Box view (opened by scanning a label's QR code) ----------
+  var viewedBoxId = null;
+
+  function boxIdFromHash() {
+    var m = /^#box=([A-Za-z0-9-]{1,64})$/.exec(window.location.hash);
+    return m ? m[1] : null;
+  }
+
+  function clearHash() {
+    if (window.location.hash) {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  }
+
+  function openBoxFromHash() {
+    var id = boxIdFromHash();
+    // Before the first load finishes, showApp() calls this again once the boxes arrive.
+    if (!id || !authenticated || !boxesLoaded) return;
+    if (!findBox(id)) {
+      clearHash();
+      alert("That box isn't in the tracker anymore. It may have been deleted or the backup replaced.");
+      return;
+    }
+    showBoxView(id);
+  }
+
+  function renderBoxView() {
+    var box = findBox(viewedBoxId);
+    if (!box) {
+      closeBoxView();
+      return;
+    }
+    $("bvTitle").textContent = "Box " + box.number;
+    var badges = $("bvBadges");
+    badges.textContent = "";
+    if (box.openFirst) badges.appendChild(el("span", { className: "tag first", text: "OPEN FIRST" }));
+    if (box.fragile) badges.appendChild(el("span", { className: "tag", text: "FRAGILE" }));
+    $("bvRoom").textContent = box.room ? "Goes to: " + box.room : "No room set";
+    $("bvLocation").textContent = "Now at: " + box.location;
+
+    var moves = $("bvMoveButtons");
+    moves.textContent = "";
+    allLocations().forEach(function (loc) {
+      if (loc === box.location) return;
+      var btn = el("button", { type: "button", text: loc });
+      btn.addEventListener("click", function () { quickMove(box.id, loc); });
+      moves.appendChild(btn);
+    });
+
+    $("bvContentsTitle").textContent = "Contents (" + box.contents.length + ")";
+    var ul = $("bvContents");
+    ul.textContent = "";
+    box.contents.forEach(function (item) { ul.appendChild(el("li", { text: item })); });
+    if (!box.contents.length) ul.appendChild(el("li", { className: "muted", text: "No contents listed" }));
+
+    $("bvNotesSection").hidden = !box.notes;
+    $("bvNotes").textContent = box.notes;
+  }
+
+  function showBoxView(id) {
+    viewedBoxId = id;
+    $("bvMoved").textContent = "";
+    $("bvMoveOther").value = "";
+    renderBoxView();
+    var dialog = $("boxDialog");
+    if (!dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+  }
+
+  function closeBoxView() {
+    var dialog = $("boxDialog");
+    if (dialog.open) dialog.close();
+  }
+
+  function quickMove(id, location) {
+    var loc = cleanString(location, MAX_LOCATION);
+    if (!loc) {
+      alert("Enter the location to move the box to.");
+      return;
+    }
+    var buttons = $("boxDialog").querySelectorAll("button");
+    buttons.forEach(function (b) { b.disabled = true; });
+    api("POST", "/api/boxes/move", { ids: [id], location: loc })
+      .then(function (res) {
+        if (!res.moved) throw new ApiError(404, "That box isn't in the tracker anymore.");
+        return loadBoxes();
+      })
+      .then(function () {
+        if (viewedBoxId !== id) return;
+        $("bvMoveOther").value = "";
+        renderBoxView();
+        $("bvMoved").textContent = "\u2713 Moved to " + loc;
+      })
+      .catch(reportError)
+      .then(function () { buttons.forEach(function (b) { b.disabled = false; }); });
+  }
+
+  $("boxDialog").addEventListener("close", function () {
+    viewedBoxId = null;
+    clearHash();
+  });
+  $("bvClose").addEventListener("click", closeBoxView);
+  $("bvMoveOtherBtn").addEventListener("click", function () {
+    if (viewedBoxId) quickMove(viewedBoxId, $("bvMoveOther").value);
+  });
+  $("bvEdit").addEventListener("click", function () {
+    var id = viewedBoxId;
+    closeBoxView();
+    if (id) startEdit(id);
+  });
+  $("bvPrint").addEventListener("click", function () {
+    var box = findBox(viewedBoxId);
+    if (box) printLabels([box]);
+  });
+  window.addEventListener("hashchange", openBoxFromHash);
 
   // ---------- Import / export ----------
   function exportData() {

@@ -14,6 +14,7 @@ device sees the same boxes. Sign-in uses one shared password.
 | `app/static/index.html` | The web page |
 | `Dockerfile`, `docker-compose.yml` | Container setup |
 | `.env.example` | Settings template — copy to `.env` (never commit `.env`) |
+| `app/static/qrcode.js` | QR code library ([qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator), MIT — see `app/static/THIRD_PARTY_LICENSES.md`) |
 | `tests/test_server.py` | Server tests |
 | `tests/e2e_smoke.js` | Browser test (optional, needs Playwright) |
 
@@ -26,6 +27,7 @@ device sees the same boxes. Sign-in uses one shared password.
 | `DATA_DIR` | `/data` | Where `tracker.db` lives inside the container. |
 | `BIND_ADDRESS` | `0.0.0.0` | Address to listen on. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
+| `PUBLIC_URL` | *(empty)* | Address phones use to reach the tracker, e.g. `http://192.168.1.50:5639`. QR codes on labels point here. If empty, they use the address you print from. An invalid value stops the container from starting. |
 | `DATA_PATH` | `/mnt/user/appdata/packing-tracker` | Compose only: host folder mounted at `/data`. |
 
 ## Install on Unraid
@@ -140,6 +142,24 @@ Each Print button asks for the label size and number of copies (1–4). In the
 browser's print window, choose the paper size that matches your roll, set
 Margins to **None** and Scale to **Default/100%**. The printer must offer that
 paper size — for a wireless Rollo, add custom sizes in the Rollo app.
+
+## QR codes
+
+4" x 6" and 3" x 2" labels include a QR code (2" x 1" labels are too small).
+Scanning it with a phone opens that box in the tracker, showing its contents
+with one-tap buttons to move it (for example to **Truck** or **New apartment**),
+plus Edit and Print. Phones must be on your home network (or VPN) and signed in;
+a phone stays signed in for 30 days.
+
+Set `PUBLIC_URL` in `.env` to the address phones should use — normally
+`http://<unraid-ip>:5639` — then restart the container. If it's empty, the codes
+use whatever address you printed from, and the tracker warns you before
+printing codes that point to `localhost`, which phones can't open.
+
+Codes link to the box itself, not its number, so renumbering a box doesn't
+break its label. If you change `PUBLIC_URL` (for example a new server IP),
+reprint the labels. Labels printed before QR codes were added still work; they
+just have no code.
 
 ## Running the tests
 
