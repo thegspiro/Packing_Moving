@@ -368,6 +368,117 @@ class QrConfiguredTests(ServerTestCase):
         self.assertEqual(data, {"publicUrl": "http://192.168.1.50:5639"})
 
 
+APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app")
+DROP_SCRIPT = """
+import os, sys, json
+sys.path.insert(0, sys.argv[1])
+import server
+changed = server.drop_privileges(sys.argv[2])
+open(os.path.join(sys.argv[2], "written-after-drop"), "w").close()
+print(json.dumps({"changed": changed, "uid": os.getuid(), "gid": os.getgid(),
+                  "groups": os.getgroups()}))
+"""
+
+
+class PrivilegeTests(unittest.TestCase):
+    def run_drop(self, data_dir, env_extra):
+        import subprocess
+        env = dict(os.environ)
+        env.update(env_extra)
+        return subprocess.run([sys.executable, "-c", DROP_SCRIPT, APP_DIR, data_dir],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def test_rejects_bad_ids(self):
+        for name, value in [("PUID", "0"), ("PUID", "abc"), ("PGID", "70000"), ("PGID", "-1")]:
+            env = {"PUID": "99", "PGID": "100", name: value}
+            saved = {k: os.environ.get(k) for k in env}
+            os.environ.update(env)
+            try:
+                with self.assertRaises(ValueError, msg=(name, value)):
+                    server._id_from_env(name, 1)
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "needs to run as root")
+    def test_root_hands_data_dir_to_puid_and_drops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o755)
+            data = os.path.join(tmp, "data")
+            os.makedirs(data)
+            existing = os.path.join(data, "tracker.db")
+            open(existing, "w").close()
+            res = self.run_drop(data, {"PUID": "4321", "PGID": "4322"})
+            self.assertEqual(res.returncode, 0, res.stderr)
+            out = json.loads(res.stdout)
+            self.assertEqual((out["changed"], out["uid"], out["gid"], out["groups"]), (True, 4321, 4322, []))
+            for path in (data, existing, os.path.join(data, "written-after-drop")):
+                st = os.stat(path)
+                self.assertEqual((st.st_uid, st.st_gid), (4321, 4322), path)
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "needs to run as root")
+    def test_root_creates_missing_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o755)
+            data = os.path.join(tmp, "new", "data")
+            res = self.run_drop(data, {"PUID": "99", "PGID": "100"})
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(os.stat(data).st_uid, 99)
+
+    def test_non_root_is_left_alone(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            import subprocess
+            with tempfile.TemporaryDirectory() as tmp:
+                os.chmod(tmp, 0o777)
+                script = ("import os, sys; os.setgid(100); os.setuid(99); sys.path.insert(0, sys.argv[1]); "
+                          "import server; print(server.drop_privileges(sys.argv[2]), os.getuid())")
+                res = subprocess.run([sys.executable, "-c", script, APP_DIR, tmp],
+                                     capture_output=True, text=True, timeout=30,
+                                     env=dict(os.environ, PUID="4321"))
+                self.assertEqual(res.stdout.split(), ["False", "99"], res.stderr)
+        else:
+            self.assertFalse(server.drop_privileges(tempfile.gettempdir()))
+
+
+class UnraidTemplateTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+    def setUp(self):
+        import xml.etree.ElementTree as ET
+        self.root = ET.parse(os.path.join(self.ROOT, "unraid", "packing-tracker.xml")).getroot()
+        self.configs = {c.get("Target"): c for c in self.root.findall("Config")}
+
+    def test_points_at_published_image_and_repo_files(self):
+        self.assertEqual(self.root.findtext("Repository"), "ghcr.io/thegspiro/packing_moving:latest")
+        base = "https://raw.githubusercontent.com/thegspiro/Packing_Moving/main/"
+        self.assertEqual(self.root.findtext("TemplateURL"), base + "unraid/packing-tracker.xml")
+        self.assertEqual(self.root.findtext("Icon"), base + "unraid/icon.png")
+        self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "unraid", "icon.png")))
+        with open(os.path.join(self.ROOT, ".github", "workflows", "docker.yml")) as fh:
+            self.assertIn("IMAGE: ghcr.io/thegspiro/packing_moving", fh.read())
+
+    def test_port_and_data_path_match_the_image(self):
+        port = self.configs["5639"]
+        self.assertEqual((port.get("Type"), port.get("Mode"), port.text), ("Port", "tcp", "5639"))
+        self.assertIn("[PORT:5639]", self.root.findtext("WebUI"))
+        data = self.configs["/data"]
+        self.assertEqual((data.get("Type"), data.text), ("Path", "/mnt/user/appdata/packing-tracker"))
+
+    def test_variables_are_ones_the_server_reads(self):
+        with open(os.path.join(self.ROOT, "app", "server.py")) as fh:
+            source = fh.read()
+        variables = [t for t, c in self.configs.items() if c.get("Type") == "Variable"]
+        self.assertEqual(sorted(variables), ["LOG_LEVEL", "PGID", "PUBLIC_URL", "PUID", "TRACKER_PASSWORD"])
+        for name in variables:
+            self.assertIn('"%s"' % name, source, name)
+        password = self.configs["TRACKER_PASSWORD"]
+        self.assertEqual((password.get("Mask"), password.get("Required")), ("true", "true"))
+        self.assertFalse((password.text or "").strip(), "template must not ship a password")
+
+
 class ConfigTests(unittest.TestCase):
     def test_refuses_to_start_with_bad_public_url(self):
         saved = {k: os.environ.get(k) for k in ("TRACKER_PASSWORD", "PUBLIC_URL")}

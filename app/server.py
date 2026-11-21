@@ -13,6 +13,10 @@ Configuration (environment variables):
   PUBLIC_URL        Optional. Address phones use to reach the tracker, e.g.
                     http://192.168.1.50:5639. QR codes on labels point here.
                     If unset, the page uses the address it was opened from.
+  PUID / PGID       User and group IDs to run as when the container starts as
+                    root, e.g. from an Unraid template (default 99 / 100).
+                    DATA_DIR is given to this user first. Ignored when the
+                    container is already started as a non-root user.
 """
 
 import hashlib
@@ -671,6 +675,37 @@ class TrackerHandler(BaseHTTPRequestHandler):
         return False
 
 
+def _id_from_env(name, default):
+    raw = os.environ.get(name, "").strip() or str(default)
+    if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+        raise ValueError("%s must be a number between 1 and 65535 (got %r)." % (name, raw))
+    return int(raw)
+
+
+def drop_privileges(data_dir):
+    """If running as root, give data_dir to PUID:PGID and switch to that user for good.
+
+    Never serves as root. Does nothing when already running as a non-root user.
+    Raises ValueError for bad PUID/PGID and OSError if the switch fails.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return False
+    uid = _id_from_env("PUID", 99)
+    gid = _id_from_env("PGID", 100)
+    os.makedirs(data_dir, exist_ok=True)
+    os.lchown(data_dir, uid, gid)
+    for root, dirs, files in os.walk(data_dir):
+        for name in dirs + files:
+            os.lchown(os.path.join(root, name), uid, gid)
+    os.setgroups([])
+    os.setgid(gid)
+    os.setuid(uid)
+    if os.geteuid() == 0 or os.getegid() == 0:
+        raise OSError("Could not stop running as root.")
+    LOG.info("Running as user %d, group %d", uid, gid)
+    return True
+
+
 def make_server(host, port, data_dir, password, public_url=""):
     os.makedirs(data_dir, exist_ok=True)
     store = Store(os.path.join(data_dir, "tracker.db"))
@@ -708,6 +743,15 @@ def main():
 
     host = os.environ.get("BIND_ADDRESS", "0.0.0.0")
     data_dir = os.environ.get("DATA_DIR", "/data")
+
+    try:
+        drop_privileges(data_dir)
+    except ValueError as err:
+        LOG.error("%s Refusing to start.", err)
+        return 2
+    except OSError as err:
+        LOG.error("Could not prepare %s or switch away from root: %s", data_dir, err)
+        return 1
 
     try:
         server = make_server(host, port, data_dir, password, public_url)

@@ -1,0 +1,89 @@
+name: Test and publish image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/thegspiro/packing_moving
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Server tests
+        run: python -m unittest discover -s tests -v
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+
+      - name: Build (and publish from main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the built image
+        if: github.event_name == 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          image="$(printf '%s\n' "$TAGS" | head -n 1)"
+          mkdir -p "$RUNNER_TEMP/data"
+          docker run -d --name pt -p 5639:5639 \
+            -e TRACKER_PASSWORD=ci-test-password \
+            -v "$RUNNER_TEMP/data:/data" "$image"
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:5639/api/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:5639/api/health
+          docker logs pt
+          docker logs pt 2>&1 | grep -q "Running as user 99, group 100"
+          test "$(stat -c %u:%g "$RUNNER_TEMP/data/tracker.db")" = "99:100"
+          docker rm -f pt
