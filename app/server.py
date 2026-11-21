@@ -10,6 +10,13 @@ Configuration (environment variables):
   BIND_ADDRESS      Address to bind (default 0.0.0.0).
   DATA_DIR          Folder holding tracker.db (default /data).
   LOG_LEVEL         DEBUG, INFO, WARNING or ERROR (default INFO).
+  PUBLIC_URL        Optional. Address phones use to reach the tracker, e.g.
+                    http://192.168.1.50:5639. QR codes on labels point here.
+                    If unset, the page uses the address it was opened from.
+  PUID / PGID       User and group IDs to run as when the container starts as
+                    root, e.g. from an Unraid template (default 99 / 100).
+                    DATA_DIR is given to this user first. Ignored when the
+                    container is already started as a non-root user.
 """
 
 import hashlib
@@ -33,6 +40,14 @@ from urllib.parse import urlparse
 LOG = logging.getLogger("packing-tracker")
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# URL path -> (file in STATIC_DIR, Content-Type). Only these files are served.
+STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/qrcode.js": ("qrcode.js", "text/javascript; charset=utf-8"),
+}
+MAX_PUBLIC_URL = 200
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_LOCATION = 60
@@ -89,6 +104,26 @@ class ApiError(Exception):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_public_url(value):
+    """Validate PUBLIC_URL. Returns it without a trailing slash ('' if unset). Raises ValueError."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) > MAX_PUBLIC_URL or CONTROL_CHARS.search(value) or " " in value:
+        raise ValueError("PUBLIC_URL is too long or contains spaces or control characters.")
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("PUBLIC_URL must start with http:// or https:// and include a host, "
+                         "e.g. http://192.168.1.50:5639")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.params:
+        raise ValueError("PUBLIC_URL must not contain a username, password, ?query or #fragment.")
+    try:
+        parsed.port
+    except ValueError:
+        raise ValueError("PUBLIC_URL has an invalid port.")
+    return value.rstrip("/")
 
 
 def clean_str(value, max_len):
@@ -430,6 +465,7 @@ class TrackerHandler(BaseHTTPRequestHandler):
     # Set by make_server()
     store = None
     auth = None
+    public_url = ""
 
     # --- plumbing ---------------------------------------------------------
 
@@ -530,9 +566,10 @@ class TrackerHandler(BaseHTTPRequestHandler):
     def _route(self, method, path):
         client = self.client_address[0]
 
-        if method == "GET" and path in ("/", "/index.html"):
-            with open(os.path.join(STATIC_DIR, "index.html"), "rb") as fh:
-                self._send(HTTPStatus.OK, fh.read(), content_type="text/html; charset=utf-8")
+        if method == "GET" and path in STATIC_FILES:
+            filename, content_type = STATIC_FILES[path]
+            with open(os.path.join(STATIC_DIR, filename), "rb") as fh:
+                self._send(HTTPStatus.OK, fh.read(), content_type=content_type)
             return True
 
         if method == "GET" and path == "/api/health":
@@ -571,6 +608,10 @@ class TrackerHandler(BaseHTTPRequestHandler):
 
         # Everything below requires a signed-in session.
         self._require_auth()
+
+        if method == "GET" and path == "/api/config":
+            self._json(HTTPStatus.OK, {"publicUrl": self.public_url})
+            return True
 
         if method == "GET" and path == "/api/boxes":
             self._json(HTTPStatus.OK, {"boxes": self.store.list_boxes()})
@@ -634,11 +675,43 @@ class TrackerHandler(BaseHTTPRequestHandler):
         return False
 
 
-def make_server(host, port, data_dir, password):
+def _id_from_env(name, default):
+    raw = os.environ.get(name, "").strip() or str(default)
+    if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+        raise ValueError("%s must be a number between 1 and 65535 (got %r)." % (name, raw))
+    return int(raw)
+
+
+def drop_privileges(data_dir):
+    """If running as root, give data_dir to PUID:PGID and switch to that user for good.
+
+    Never serves as root. Does nothing when already running as a non-root user.
+    Raises ValueError for bad PUID/PGID and OSError if the switch fails.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return False
+    uid = _id_from_env("PUID", 99)
+    gid = _id_from_env("PGID", 100)
+    os.makedirs(data_dir, exist_ok=True)
+    os.lchown(data_dir, uid, gid)
+    for root, dirs, files in os.walk(data_dir):
+        for name in dirs + files:
+            os.lchown(os.path.join(root, name), uid, gid)
+    os.setgroups([])
+    os.setgid(gid)
+    os.setuid(uid)
+    if os.geteuid() == 0 or os.getegid() == 0:
+        raise OSError("Could not stop running as root.")
+    LOG.info("Running as user %d, group %d", uid, gid)
+    return True
+
+
+def make_server(host, port, data_dir, password, public_url=""):
     os.makedirs(data_dir, exist_ok=True)
     store = Store(os.path.join(data_dir, "tracker.db"))
     auth = Auth(password, store.get_or_create_secret())
-    handler = type("BoundTrackerHandler", (TrackerHandler,), {"store": store, "auth": auth})
+    handler = type("BoundTrackerHandler", (TrackerHandler,),
+                   {"store": store, "auth": auth, "public_url": parse_public_url(public_url)})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
@@ -662,11 +735,26 @@ def main():
         LOG.error("PORT must be a number between 1 and 65535.")
         return 2
 
+    try:
+        public_url = parse_public_url(os.environ.get("PUBLIC_URL", ""))
+    except ValueError as err:
+        LOG.error("%s Refusing to start.", err)
+        return 2
+
     host = os.environ.get("BIND_ADDRESS", "0.0.0.0")
     data_dir = os.environ.get("DATA_DIR", "/data")
 
     try:
-        server = make_server(host, port, data_dir, password)
+        drop_privileges(data_dir)
+    except ValueError as err:
+        LOG.error("%s Refusing to start.", err)
+        return 2
+    except OSError as err:
+        LOG.error("Could not prepare %s or switch away from root: %s", data_dir, err)
+        return 1
+
+    try:
+        server = make_server(host, port, data_dir, password, public_url)
     except (OSError, sqlite3.Error, RuntimeError) as err:
         LOG.error("Could not start: %s", err)
         return 1
@@ -679,6 +767,10 @@ def main():
     signal.signal(signal.SIGINT, stop)
 
     LOG.info("Packing Tracker listening on %s:%d (data in %s)", host, port, data_dir)
+    if public_url:
+        LOG.info("QR codes will point to %s", public_url)
+    else:
+        LOG.info("PUBLIC_URL not set; QR codes will use the address the page was opened from")
     server.serve_forever()
     server.server_close()
     LOG.info("Stopped")

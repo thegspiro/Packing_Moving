@@ -1,5 +1,9 @@
 FROM python:3.13-slim
 
+LABEL org.opencontainers.image.title="Packing Tracker" \
+      org.opencontainers.image.description="Track moving boxes and print labels with QR codes" \
+      org.opencontainers.image.source="https://github.com/thegspiro/Packing_Moving"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=5639 \
@@ -10,9 +14,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY app/ /app/
 
-# Unraid's standard nobody:users (99:100). Override with `user:` in compose or --user.
+# The server runs as Unraid's standard nobody:users (99:100). Started as root
+# (as an Unraid template does), it gives /data to PUID:PGID and drops to that
+# user before doing anything else. Started with --user / compose `user:`, it
+# just runs as that user.
+ENV PUID=99 \
+    PGID=100
 RUN mkdir -p /data && chown 99:100 /data
-USER 99:100
 
 VOLUME ["/data"]
 EXPOSE 5639
