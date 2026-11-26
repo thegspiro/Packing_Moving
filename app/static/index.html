@@ -34,6 +34,8 @@
   }
   header h1 { margin: 0; font-size: 1.3rem; }
   main { max-width: 1200px; margin: 0 auto; padding: 20px; display: grid; gap: 20px; }
+  /* Grid items default to min-width: auto, which lets a wide table push the page past the screen. */
+  main > * { min-width: 0; }
   @media (min-width: 900px) { main { grid-template-columns: 360px 1fr; align-items: start; } }
   .card {
     background: var(--card);
@@ -100,6 +102,29 @@
   #loginView { max-width: 360px; margin: 80px auto; }
   .error { color: var(--danger); font-size: .88rem; margin-top: 10px; }
   .status { font-size: .85rem; color: var(--danger); }
+
+  /* Phones: show each box as a stacked card instead of a table row that runs off the screen. */
+  @media (max-width: 640px) {
+    main { padding: 12px; }
+    table, table tbody { display: block; }
+    table thead {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+    }
+    #boxTable tr {
+      display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    #boxTable td { display: block; border: 0; padding: 2px 0; grid-column: 2; }
+    #boxTable td:first-child { grid-column: 1; grid-row: span 5; padding-top: 4px; }
+    #boxTable td:nth-child(3)::before, #boxTable td:nth-child(4)::before {
+      color: var(--muted); font-weight: 600; font-size: .8rem;
+    }
+    #boxTable td:nth-child(3)::before { content: "Room: "; }
+    #boxTable td:nth-child(4)::before { content: "Now at: "; }
+    #boxTable td.contents { max-width: none; }
+    #boxTable td.btns { white-space: normal; text-align: left; padding-top: 6px; }
+    #boxTable td.btns button { margin: 4px 6px 0 0; padding: 8px 12px; font-size: .9rem; }
+  }
 
   /* ---------- Labels (only visible when printing) ---------- */
   #printArea { display: none; }

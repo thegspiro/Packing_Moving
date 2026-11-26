@@ -159,6 +159,17 @@ function check(cond, msg) {
   check((await phone.textContent('#bvTitle')) === 'Box 1024', 'scan link survives signing in on a phone');
   await phone.screenshot({ path: path.join(OUT_DIR, 'phone-box-view.png') });
 
+  // The box list must fit a phone screen: no sideways scrolling, every button and field reachable.
+  const phoneLayout = await phone.evaluate(() => {
+    const vw = document.documentElement.clientWidth;
+    const offScreen = [...document.querySelectorAll('#appMain button, #appMain input, #appMain select')]
+      .filter(e => e.offsetParent && e.getBoundingClientRect().right > vw + 0.5)
+      .map(e => e.id || e.textContent.trim());
+    return { pageWidth: document.documentElement.scrollWidth, vw, offScreen };
+  });
+  check(phoneLayout.pageWidth <= phoneLayout.vw && phoneLayout.offScreen.length === 0,
+        'box list fits a phone screen (' + JSON.stringify(phoneLayout) + ')');
+
   // Unknown box link.
   await page.evaluate(() => { window.location.hash = 'box=no-such-box'; });
   await page.waitForTimeout(200);
