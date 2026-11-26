@@ -1,10 +1,11 @@
 # Packing Tracker
 
 Track what's in each moving box, where each box is, and print labels on a Rollo
-(or any) label printer at 4" x 6", 3" x 2" or 2" x 1".
+(or any) label printer at 4" x 6", 3" x 2" or 2" x 1". Add up to 5 photos of
+each box's contents.
 
-The data is stored on the server in a single SQLite file, so every browser and
-device sees the same boxes. Sign-in uses one shared password.
+The data, photos included, is stored on the server in a single SQLite file, so
+every browser and device sees the same boxes. Sign-in uses one shared password.
 
 ## What's in this folder
 
@@ -138,10 +139,21 @@ Importing **replaces** all boxes on the server.
 
 ## Backups
 
-- Easiest: click **Export backup** in the tracker now and then.
+- Easiest: click **Export backup** in the tracker now and then. It offers two
+  kinds of file:
+  - **Boxes and photos (.zip)** — a complete backup. Restore it with
+    **Import backup**: it replaces every box *and every photo* on the server.
+  - **Boxes only (.json)** — a small file without photos, in the same format as
+    before photos existed. Importing it replaces every box; photos are kept for
+    boxes that are in the file and deleted for boxes that aren't.
 - Or back up `/mnt/user/appdata/packing-tracker` while the container is stopped
-  (the Appdata Backup plugin does this for you). Copying `tracker.db` while the
-  container is running can miss recent changes.
+  (the Appdata Backup plugin does this for you). This includes photos. Copying
+  `tracker.db` while the container is running can miss recent changes.
+
+Restoring a `.zip` backup up to 2 GB is supported. While it restores, the
+upload is held in a temporary file in the data folder, so that folder needs
+free space at least the size of the backup. If anything in the file is damaged,
+nothing on the server is changed.
 
 ## Updating
 
@@ -175,6 +187,19 @@ Database changes are applied automatically on start. If you go back to an older
 version after the database was upgraded, the container refuses to start rather
 than risk your data; restore a backup or reinstall the newer version.
 
+### Going back to the version before photos
+
+The photos update adds a table to the database. To go back to the previous
+version anyway, **export a backup first**, stop the tracker, then remove the
+photos table (this **deletes all photos**; boxes are kept):
+
+```bash
+docker run --rm --user 99:100 -v /mnt/user/appdata/packing-tracker:/data ghcr.io/thegspiro/packing_moving:latest python3 -c "import sqlite3; c = sqlite3.connect('/data/tracker.db'); c.executescript('DROP INDEX IF EXISTS photos_box_id; DROP TABLE IF EXISTS photos; PRAGMA user_version = 1; VACUUM;'); c.close()"
+```
+
+For a compose install, use `packing-tracker:latest` as the image name. Then
+start the older version.
+
 ## Printing labels
 
 Each Print button asks for the label size and number of copies (1–4). In the
@@ -200,6 +225,33 @@ Codes link to the box itself, not its number, so renumbering a box doesn't
 break its label. If you change `PUBLIC_URL` (for example a new server IP),
 reprint the labels. Labels printed before QR codes were added still work; they
 just have no code.
+
+## Photos
+
+Each box can have up to 5 photos of its contents — handy for finding things
+months later in storage. Add them from:
+
+- the box's view (scan its label, or click **View** in the list) with
+  **Add photo**, or
+- the **Add box** / **Edit** form with **Add photos**. Photos picked there are
+  uploaded when you save the box; **Cancel edit** discards photo changes too.
+
+On a phone, **Add photo** lets you take a picture or pick one from your library.
+Tap a photo to see it full size or delete it. Boxes with photos show the count
+in the box list.
+
+Photos are made smaller on the phone or computer before they're uploaded (at
+most 1600 pixels on the long side, usually 200–500 KB), which also removes
+hidden details cameras save in photos, such as GPS location. Photos aren't
+printed on labels. Deleting a box deletes its photos.
+
+Photos are stored inside `tracker.db`, so the database grows by roughly
+300 KB per photo (about 150 MB for 100 boxes with 5 photos each). Deleting
+photos frees that space for new photos but doesn't make the file smaller.
+
+iPhone photos in HEIC format can be added from the iPhone itself, but a
+desktop browser that can't open HEIC files (such as Chrome on Windows) will
+say so; pick a JPEG or PNG there instead.
 
 ## Running the tests
 
