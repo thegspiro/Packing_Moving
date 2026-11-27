@@ -29,9 +29,12 @@ import secrets
 import signal
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
+import zlib
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,6 +61,21 @@ MAX_NOTES = 200
 MAX_NUMBER = 999999
 MAX_BULK_IDS = 5000
 
+# Photos are shrunk and re-encoded as JPEG by the web page before upload (typically 200-500 KB).
+MAX_PHOTOS_PER_BOX = 5
+MAX_PHOTO_BYTES = 2 * 1024 * 1024
+JPEG_MAGIC = b"\xff\xd8\xff"
+
+# Full backups: a zip holding backup.json (same format as the JSON backup, plus photo
+# references) and photos/<id>.jpg. Uploaded backups are spooled to a temporary file in
+# DATA_DIR, so restoring needs that much free space there.
+MAX_BACKUP_ZIP_BYTES = 2 * 1024 * 1024 * 1024
+MAX_BACKUP_JSON_BYTES = 64 * 1024 * 1024
+BACKUP_JSON_NAME = "backup.json"
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+STREAM_CHUNK_BYTES = 64 * 1024
+MAX_TIMESTAMP = 40
+
 SESSION_COOKIE = "pt_session"
 SESSION_TTL_SECONDS = 30 * 24 * 3600
 LOGIN_MAX_FAILURES = 5
@@ -68,6 +86,9 @@ CSRF_VALUE = "packing-tracker"
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 BOX_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 BOX_PATH_RE = re.compile(r"^/api/boxes/([A-Za-z0-9-]{1,64})$")
+BOX_PHOTOS_PATH_RE = re.compile(r"^/api/boxes/([A-Za-z0-9-]{1,64})/photos$")
+PHOTO_PATH_RE = re.compile(r"^/api/photos/([A-Za-z0-9-]{1,64})$")
+PHOTO_FILE_RE = re.compile(r"^photos/[A-Za-z0-9-]{1,64}\.jpg$")
 
 # Each entry upgrades the schema by one version (PRAGMA user_version).
 # Never edit an existing entry; append a new one for future changes.
@@ -89,6 +110,18 @@ MIGRATIONS = [
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+    """,
+    # 2: photos of a box's contents. No foreign key on box_id: importing a backup deletes
+    # and re-inserts boxes with their original ids, and photos of those boxes must survive.
+    # Store removes photos explicitly when their box is deleted or left out of an import.
+    """
+    CREATE TABLE IF NOT EXISTS photos (
+        id      TEXT PRIMARY KEY,
+        box_id  TEXT NOT NULL,
+        data    BLOB NOT NULL,
+        added   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS photos_box_id ON photos (box_id);
     """,
 ]
 
@@ -180,10 +213,12 @@ def validate_box_input(data):
     }
 
 
-def sanitize_import(data):
+def sanitize_import(data, keep_photo_refs=False):
     """Leniently normalise a backup file (also accepts the original browser-only format).
 
     Invalid boxes and duplicate numbers are skipped, matching the web page's behaviour.
+    With keep_photo_refs, each box also carries its raw "photos" entry as "photoRefs"
+    for plan_backup_restore() to validate.
     Returns (boxes, skipped_count).
     """
     if not isinstance(data, dict) or not isinstance(data.get("boxes"), list):
@@ -207,7 +242,7 @@ def sanitize_import(data):
             box_id = str(uuid.uuid4())
         seen_numbers.add(number)
         seen_ids.add(box_id)
-        boxes.append({
+        box = {
             "id": box_id,
             "number": number,
             "location": clean_str(raw.get("location"), MAX_LOCATION) or "Old apartment",
@@ -216,8 +251,87 @@ def sanitize_import(data):
             "notes": clean_str(raw.get("notes"), MAX_NOTES),
             "fragile": raw.get("fragile") is True,
             "openFirst": raw.get("openFirst") is True,
-        })
+        }
+        if keep_photo_refs:
+            box["photoRefs"] = raw.get("photos")
+        boxes.append(box)
     return boxes, skipped
+
+
+def clean_timestamp(value):
+    """Return value if it is a sensible ISO 8601 timestamp, otherwise the current time."""
+    if isinstance(value, str) and len(value) <= MAX_TIMESTAMP and not CONTROL_CHARS.search(value):
+        try:
+            datetime.fromisoformat(value)
+            return value
+        except ValueError:
+            pass
+    return now_iso()
+
+
+def is_jpeg(data):
+    return data.startswith(JPEG_MAGIC)
+
+
+def plan_backup_restore(zf):
+    """Read and validate backup.json from a full-backup zip without touching the database.
+
+    Returns (boxes, skipped_boxes, skipped_photos). Each box's "photoRefs" becomes a list of
+    (photo_id, added, member_name) tuples, at most MAX_PHOTOS_PER_BOX per box. Photo data is
+    not read here; see load_backup_photo(). Nothing is extracted to disk.
+    """
+    try:
+        info = zf.getinfo(BACKUP_JSON_NAME)
+    except KeyError:
+        raise ApiError(HTTPStatus.BAD_REQUEST,
+                       "This zip file is not a Packing Tracker backup (%s is missing)." % BACKUP_JSON_NAME)
+    if info.file_size > MAX_BACKUP_JSON_BYTES:
+        raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "The backup's box list is too large.")
+    with zf.open(info) as fh:
+        raw = fh.read(MAX_BACKUP_JSON_BYTES + 1)
+    if len(raw) > MAX_BACKUP_JSON_BYTES:
+        raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "The backup's box list is too large.")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "The backup's box list is not valid JSON.")
+
+    boxes, skipped = sanitize_import(data, keep_photo_refs=True)
+    seen_photo_ids, skipped_photos = set(), 0
+    for box in boxes:
+        raw_refs = box["photoRefs"] if isinstance(box["photoRefs"], list) else []
+        refs = []
+        for ref in raw_refs:
+            member = ref.get("file") if isinstance(ref, dict) else None
+            if (not isinstance(member, str) or not PHOTO_FILE_RE.match(member)
+                    or len(refs) >= MAX_PHOTOS_PER_BOX):
+                skipped_photos += 1
+                continue
+            photo_id = ref.get("id")
+            if not isinstance(photo_id, str) or not BOX_ID_RE.match(photo_id) or photo_id in seen_photo_ids:
+                photo_id = str(uuid.uuid4())
+            seen_photo_ids.add(photo_id)
+            refs.append((photo_id, clean_timestamp(ref.get("added")), member))
+        box["photoRefs"] = refs
+    return boxes, skipped, skipped_photos
+
+
+def load_backup_photo(zf, member):
+    """Return a photo's bytes from a backup zip, or None if it is missing, too large or not a JPEG.
+
+    A damaged zip raises zipfile.BadZipFile (or zlib.error), which aborts the whole restore.
+    """
+    try:
+        info = zf.getinfo(member)
+    except KeyError:
+        return None
+    if info.file_size > MAX_PHOTO_BYTES:
+        return None
+    with zf.open(info) as fh:
+        data = fh.read(MAX_PHOTO_BYTES + 1)
+    if len(data) > MAX_PHOTO_BYTES or not is_jpeg(data):
+        return None
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +343,7 @@ class Store:
 
     def __init__(self, db_path):
         self.db_path = db_path
+        self.data_dir = os.path.dirname(os.path.abspath(db_path))
         self._write_lock = threading.Lock()
         self._migrate()
 
@@ -257,7 +372,7 @@ class Store:
                 conn.close()
 
     @staticmethod
-    def _row_to_box(row):
+    def _row_to_box(row, photos=None):
         return {
             "id": row["id"],
             "number": row["number"],
@@ -269,7 +384,34 @@ class Store:
             "openFirst": bool(row["open_first"]),
             "rev": row["rev"],
             "updated": row["updated"],
+            "photos": photos or [],
         }
+
+    @staticmethod
+    def _photo_meta(conn, box_id=None):
+        """Photo ids and times (never the image data), oldest first, keyed by box id."""
+        if box_id is None:
+            rows = conn.execute("SELECT id, box_id, added FROM photos ORDER BY rowid")
+        else:
+            rows = conn.execute("SELECT id, box_id, added FROM photos WHERE box_id = ? ORDER BY rowid",
+                                (box_id,))
+        by_box = {}
+        for row in rows:
+            by_box.setdefault(row["box_id"], []).append({"id": row["id"], "added": row["added"]})
+        return by_box
+
+    def _all_boxes(self, conn):
+        photos = self._photo_meta(conn)
+        rows = conn.execute("SELECT * FROM boxes ORDER BY number").fetchall()
+        return [self._row_to_box(r, photos.get(r["id"])) for r in rows]
+
+    @staticmethod
+    def _insert_boxes(conn, boxes, stamp):
+        conn.executemany(
+            "INSERT INTO boxes (id, number, location, room, contents, notes, fragile, "
+            "open_first, rev, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            [(b["id"], b["number"], b["location"], b["room"], json.dumps(b["contents"]),
+              b["notes"], int(b["fragile"]), int(b["openFirst"]), stamp) for b in boxes])
 
     def get_or_create_secret(self):
         with self._write_lock:
@@ -288,14 +430,15 @@ class Store:
     def list_boxes(self):
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT * FROM boxes ORDER BY number").fetchall()
-            return [self._row_to_box(r) for r in rows]
+            return self._all_boxes(conn)
         finally:
             conn.close()
 
     def get_box(self, conn, box_id):
         row = conn.execute("SELECT * FROM boxes WHERE id = ?", (box_id,)).fetchone()
-        return self._row_to_box(row) if row else None
+        if not row:
+            return None
+        return self._row_to_box(row, self._photo_meta(conn, box_id).get(box_id))
 
     def _number_taken(self, conn, number, exclude_id=None):
         row = conn.execute("SELECT id FROM boxes WHERE number = ?", (number,)).fetchone()
@@ -348,6 +491,7 @@ class Store:
             try:
                 with conn:
                     cur = conn.execute("DELETE FROM boxes WHERE id = ?", (box_id,))
+                    conn.execute("DELETE FROM photos WHERE box_id = ?", (box_id,))
                 if cur.rowcount == 0:
                     raise ApiError(HTTPStatus.NOT_FOUND, "That box no longer exists.")
             finally:
@@ -370,17 +514,124 @@ class Store:
                 conn.close()
 
     def replace_all(self, boxes):
+        """Replace every box (JSON import). Photos of boxes kept by id survive; the rest are removed.
+
+        Returns the number of photos removed.
+        """
         with self._write_lock:
             conn = self._connect()
             try:
-                stamp = now_iso()
                 with conn:
                     conn.execute("DELETE FROM boxes")
-                    conn.executemany(
-                        "INSERT INTO boxes (id, number, location, room, contents, notes, fragile, "
-                        "open_first, rev, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                        [(b["id"], b["number"], b["location"], b["room"], json.dumps(b["contents"]),
-                          b["notes"], int(b["fragile"]), int(b["openFirst"]), stamp) for b in boxes])
+                    self._insert_boxes(conn, boxes, now_iso())
+                    cur = conn.execute("DELETE FROM photos WHERE box_id NOT IN (SELECT id FROM boxes)")
+                return cur.rowcount
+            finally:
+                conn.close()
+
+    def restore_full(self, boxes, load_photo):
+        """Replace every box and photo from a full backup, all or nothing.
+
+        Each box's "photoRefs" lists (photo_id, added, member) tuples from plan_backup_restore().
+        load_photo(member) returns the photo's bytes, or None to skip it; if it raises, nothing
+        changes. Returns (photos_restored, photos_skipped).
+        """
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                restored = skipped = 0
+                with conn:
+                    conn.execute("DELETE FROM photos")
+                    conn.execute("DELETE FROM boxes")
+                    self._insert_boxes(conn, boxes, now_iso())
+                    for box in boxes:
+                        for photo_id, added, member in box.get("photoRefs", []):
+                            data = load_photo(member)
+                            if data is None:
+                                skipped += 1
+                                continue
+                            conn.execute("INSERT INTO photos (id, box_id, data, added) VALUES (?, ?, ?, ?)",
+                                         (photo_id, box["id"], sqlite3.Binary(data), added))
+                            restored += 1
+                return restored, skipped
+            finally:
+                conn.close()
+
+    def write_full_backup(self, fileobj, on_ready):
+        """Write a full-backup zip (boxes and photos) to fileobj from one consistent snapshot.
+
+        on_ready() is called once the snapshot is open and before anything is written, so the
+        caller can send response headers only when the backup can actually be produced.
+        Returns (box_count, photo_count).
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")  # WAL read transaction: a consistent snapshot; writers aren't blocked
+            boxes = self._all_boxes(conn)
+            exported = []
+            for box in boxes:
+                box = dict(box)
+                box["photos"] = [{"id": p["id"], "added": p["added"], "file": "photos/%s.jpg" % p["id"]}
+                                 for p in box["photos"]]
+                exported.append(box)
+            manifest = json.dumps({"version": 2, "exported": now_iso(), "boxes": exported},
+                                  indent=2).encode("utf-8")
+            on_ready()
+            photo_count = 0
+            with zipfile.ZipFile(fileobj, "w", allowZip64=True) as zf:
+                zf.writestr(BACKUP_JSON_NAME, manifest, compress_type=zipfile.ZIP_DEFLATED)
+                rows = conn.execute("SELECT p.id, p.data FROM photos p JOIN boxes b ON b.id = p.box_id "
+                                    "ORDER BY p.rowid")
+                for row in rows:
+                    # JPEGs are already compressed; store them as-is.
+                    zf.writestr("photos/%s.jpg" % row["id"], bytes(row["data"]),
+                                compress_type=zipfile.ZIP_STORED)
+                    photo_count += 1
+            return len(boxes), photo_count
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def add_photo(self, box_id, data):
+        """Store a photo for a box. Doesn't change the box's rev, so it never causes an edit conflict.
+
+        Returns (box_number, {"id", "added"}).
+        """
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                box = conn.execute("SELECT number FROM boxes WHERE id = ?", (box_id,)).fetchone()
+                if box is None:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "That box no longer exists.")
+                count = conn.execute("SELECT COUNT(*) FROM photos WHERE box_id = ?", (box_id,)).fetchone()[0]
+                if count >= MAX_PHOTOS_PER_BOX:
+                    raise ApiError(HTTPStatus.CONFLICT,
+                                   "Box %d already has %d photos. Delete one to add another."
+                                   % (box["number"], MAX_PHOTOS_PER_BOX))
+                photo = {"id": str(uuid.uuid4()), "added": now_iso()}
+                with conn:
+                    conn.execute("INSERT INTO photos (id, box_id, data, added) VALUES (?, ?, ?, ?)",
+                                 (photo["id"], box_id, sqlite3.Binary(data), photo["added"]))
+                return box["number"], photo
+            finally:
+                conn.close()
+
+    def get_photo(self, photo_id):
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT data FROM photos WHERE id = ?", (photo_id,)).fetchone()
+            return bytes(row["data"]) if row else None
+        finally:
+            conn.close()
+
+    def delete_photo(self, photo_id):
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                with conn:
+                    cur = conn.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
+                if cur.rowcount == 0:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "That photo no longer exists.")
             finally:
                 conn.close()
 
@@ -457,6 +708,38 @@ SECURITY_HEADERS = {
 }
 
 
+class ChunkedWriter:
+    """Write-only file object that sends its data as an HTTP/1.1 chunked response body.
+
+    It has no tell()/seek(), so zipfile writes in streaming mode. Small writes are buffered
+    into chunks of about STREAM_CHUNK_BYTES.
+    """
+
+    def __init__(self, wfile):
+        self._wfile = wfile
+        self._buffer = bytearray()
+
+    def write(self, data):
+        self._buffer += data
+        if len(self._buffer) >= STREAM_CHUNK_BYTES:
+            self._send_buffer()
+        return len(data)
+
+    def _send_buffer(self):
+        if self._buffer:
+            self._wfile.write(b"%x\r\n" % len(self._buffer) + bytes(self._buffer) + b"\r\n")
+            self._buffer.clear()
+
+    def flush(self):
+        self._send_buffer()
+        self._wfile.flush()
+
+    def finish(self):
+        self._send_buffer()
+        self._wfile.write(b"0\r\n\r\n")
+        self._wfile.flush()
+
+
 class TrackerHandler(BaseHTTPRequestHandler):
     server_version = "PackingTracker/1.0"
     sys_version = ""
@@ -514,6 +797,103 @@ class TrackerHandler(BaseHTTPRequestHandler):
     def _require_csrf_header(self):
         if self.headers.get(CSRF_HEADER) != CSRF_VALUE:
             raise ApiError(HTTPStatus.FORBIDDEN, "Missing request header.")
+
+    def _upload_length(self, content_type, max_bytes, too_large_message):
+        """Check the headers of a raw (non-JSON) upload. Returns the body length."""
+        self._require_csrf_header()
+        sent_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if sent_type != content_type:
+            raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Content-Type must be %s." % content_type)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Invalid Content-Length.")
+        if length <= 0:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "The upload is empty.")
+        if length > max_bytes:
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, too_large_message)
+        return length
+
+    def _read_photo(self):
+        length = self._upload_length("image/jpeg", MAX_PHOTO_BYTES,
+                                     "That photo is too large (the limit is %d MB)."
+                                     % (MAX_PHOTO_BYTES // (1024 * 1024)))
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "The upload was interrupted.")
+        if not is_jpeg(data):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Photos must be JPEG images.")
+        return data
+
+    def _spool_backup_upload(self):
+        """Copy an uploaded full-backup zip to an unnamed temporary file in the data folder.
+
+        It is read in chunks, so it never sits in memory. The caller must close the returned
+        file; the operating system deletes it then (or if the process dies).
+        """
+        remaining = self._upload_length("application/zip", MAX_BACKUP_ZIP_BYTES,
+                                        "That backup is too large (the limit is %d GB)."
+                                        % (MAX_BACKUP_ZIP_BYTES // (1024 ** 3)))
+        try:
+            spool = tempfile.TemporaryFile(dir=self.store.data_dir)
+        except OSError as err:
+            LOG.error("Could not create a temporary file in %s: %s", self.store.data_dir, err)
+            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR,
+                           "Could not write to the data folder. Check the container log.")
+        try:
+            while remaining:
+                chunk = self.rfile.read(min(UPLOAD_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "The upload was interrupted.")
+                try:
+                    spool.write(chunk)
+                except OSError as err:
+                    LOG.error("Could not save uploaded backup to %s: %s", self.store.data_dir, err)
+                    raise ApiError(HTTPStatus.INSUFFICIENT_STORAGE,
+                                   "Not enough free space in the data folder to restore this backup.")
+                remaining -= len(chunk)
+            spool.seek(0)
+            return spool
+        except BaseException:
+            spool.close()
+            raise
+
+    def _send_full_backup(self, client):
+        """Stream a zip of all boxes and photos. Errors after the headers are sent abort the download."""
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        headers_sent = []
+
+        def send_headers():
+            self.send_response(HTTPStatus.OK)
+            for name, value in SECURITY_HEADERS.items():
+                self.send_header(name, value)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="packing-tracker-%s-with-photos.zip"' % stamp)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            headers_sent.append(True)
+
+        if self.command == "HEAD":
+            send_headers()
+            return
+        writer = ChunkedWriter(self.wfile)
+        try:
+            boxes, photos = self.store.write_full_backup(writer, send_headers)
+            writer.finish()
+        except Exception as err:
+            if not headers_sent:
+                raise
+            # The status line is already sent; dropping the connection mid-body makes the
+            # browser report the download as failed instead of saving a truncated zip.
+            self.close_connection = True
+            if isinstance(err, (BrokenPipeError, ConnectionResetError)):
+                LOG.warning("Full backup download to %s was cancelled", client)
+            else:
+                LOG.exception("Full backup download to %s failed", client)
+            return
+        LOG.info("Exported full backup (%d box(es), %d photo(s)) to %s", boxes, photos, client)
 
     def _session_token(self):
         for part in (self.headers.get("Cookie") or "").split(";"):
@@ -655,19 +1035,71 @@ class TrackerHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"moved": moved})
             return True
 
+        match = BOX_PHOTOS_PATH_RE.match(path)
+        if match and method == "POST":
+            number, photo = self.store.add_photo(match.group(1), self._read_photo())
+            LOG.info("Added photo %s to box %d from %s", photo["id"], number, client)
+            self._json(HTTPStatus.CREATED, {"photo": photo})
+            return True
+
+        match = PHOTO_PATH_RE.match(path)
+        if match and method == "GET":
+            data = self.store.get_photo(match.group(1))
+            if data is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "That photo no longer exists.")
+            self._send(HTTPStatus.OK, data, content_type="image/jpeg")
+            return True
+
+        if match and method == "DELETE":
+            self._require_csrf_header()
+            self.store.delete_photo(match.group(1))
+            LOG.info("Deleted photo %s from %s", match.group(1), client)
+            self._json(HTTPStatus.OK, {"deleted": match.group(1)})
+            return True
+
+        if match:
+            raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed.")
+
         if method == "GET" and path == "/api/export":
+            # Boxes only; the format is unchanged from before photos existed.
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            body = json.dumps({"version": 2, "exported": now_iso(), "boxes": self.store.list_boxes()},
+            boxes = [{k: v for k, v in b.items() if k != "photos"} for b in self.store.list_boxes()]
+            body = json.dumps({"version": 2, "exported": now_iso(), "boxes": boxes},
                               indent=2).encode("utf-8")
             self._send(HTTPStatus.OK, body, headers={
                 "Content-Disposition": 'attachment; filename="packing-tracker-%s.json"' % stamp})
             return True
 
+        if method == "GET" and path == "/api/export/full":
+            self._send_full_backup(client)
+            return True
+
         if method == "POST" and path == "/api/import":
             boxes, skipped = sanitize_import(self._read_json())
-            self.store.replace_all(boxes)
-            LOG.info("Imported %d box(es) (%d skipped) from %s", len(boxes), skipped, client)
-            self._json(HTTPStatus.OK, {"imported": len(boxes), "skipped": skipped})
+            photos_removed = self.store.replace_all(boxes)
+            LOG.info("Imported %d box(es) (%d skipped, %d photo(s) of removed boxes deleted) from %s",
+                     len(boxes), skipped, photos_removed, client)
+            self._json(HTTPStatus.OK, {"imported": len(boxes), "skipped": skipped,
+                                       "photosRemoved": photos_removed})
+            return True
+
+        if method == "POST" and path == "/api/import/full":
+            with self._spool_backup_upload() as spool:
+                try:
+                    with zipfile.ZipFile(spool) as zf:
+                        boxes, skipped, refs_skipped = plan_backup_restore(zf)
+                        photos, photos_skipped = self.store.restore_full(
+                            boxes, lambda member: load_backup_photo(zf, member))
+                except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as err:
+                    LOG.warning("Rejected full backup from %s: %s", client, err)
+                    raise ApiError(HTTPStatus.BAD_REQUEST,
+                                   "That file is damaged or is not a Packing Tracker backup. "
+                                   "Nothing was changed.")
+            photos_skipped += refs_skipped
+            LOG.info("Restored full backup: %d box(es) (%d skipped), %d photo(s) (%d skipped) from %s",
+                     len(boxes), skipped, photos, photos_skipped, client)
+            self._json(HTTPStatus.OK, {"imported": len(boxes), "skipped": skipped,
+                                       "photos": photos, "photosSkipped": photos_skipped})
             return True
 
         if path.startswith("/api/boxes"):

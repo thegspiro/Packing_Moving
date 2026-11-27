@@ -221,6 +221,124 @@ function check(cond, msg) {
     await page.emulateMedia({ media: 'screen' });
   }
 
+  // ---------- Photos ----------
+  // A camera-sized JPEG drawn in the browser, with fake location metadata tucked in so we can
+  // check that the page's re-encoding strips it.
+  async function makePhoto(w, h, hue) {
+    const b64 = await page.evaluate(([w, h, hue]) => {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = `hsl(${hue}, 70%, 60%)`;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#000';
+      ctx.font = Math.round(h / 5) + 'px sans-serif';
+      ctx.fillText('BOX', w / 10, h / 2);
+      return c.toDataURL('image/jpeg', 0.9).split(',')[1];
+    }, [w, h, hue]);
+    const jpeg = Buffer.from(b64, 'base64');
+    const exif = Buffer.from('Exif\0\0GPS-SECRET-LOCATION');
+    const app1 = Buffer.concat([Buffer.from([0xff, 0xe1, (exif.length + 2) >> 8, (exif.length + 2) & 0xff]), exif]);
+    return Buffer.concat([jpeg.subarray(0, 2), app1, jpeg.subarray(2)]);
+  }
+  const file = (name, buffer) => ({ name, mimeType: 'image/jpeg', buffer });
+  const boxById = id => page.evaluate(async id =>
+    (await (await fetch('/api/boxes')).json()).boxes.find(b => b.id === id), id);
+
+  // Add photos from the box view (what a phone opens after scanning a label).
+  const camera = await makePhoto(4000, 3000, 30);
+  check(camera.includes('GPS-SECRET-LOCATION'), 'test photo carries location metadata');
+  await page.evaluate(id => { window.location.hash = 'box=' + id; }, ids[3]);
+  await page.waitForSelector('#boxDialog[open]');
+  check((await page.textContent('#bvPhotosTitle')) === 'Photos', 'box starts without photos');
+  await page.setInputFiles('#bvPhotoInput', [file('camera.jpg', camera), file('portrait.jpg', await makePhoto(1200, 1600, 200))]);
+  await page.waitForFunction(() => document.getElementById('bvPhotoStatus').textContent.includes('Added 2 photos'));
+  check((await page.$$('#bvPhotos img')).length === 2, 'box view shows the 2 new photos');
+  const stored = await page.evaluate(async id => {
+    const box = (await (await fetch('/api/boxes')).json()).boxes.find(b => b.id === id);
+    return Promise.all(box.photos.map(async p => {
+      const bytes = new Uint8Array(await (await fetch('/api/photos/' + p.id)).arrayBuffer());
+      const img = new Image();
+      img.src = '/api/photos/' + p.id;
+      await img.decode();
+      return { w: img.naturalWidth, h: img.naturalHeight, size: bytes.length,
+               jpeg: bytes[0] === 0xff && bytes[1] === 0xd8,
+               gps: new TextDecoder('windows-1252').decode(bytes).includes('GPS-SECRET') };
+    }));
+  }, ids[3]);
+  check(stored[0].w === 1600 && stored[0].h === 1200, 'large photo shrunk to 1600px (' + JSON.stringify(stored[0]) + ')');
+  check(stored[1].w === 1200 && stored[1].h === 1600, 'photo already small enough keeps its size');
+  check(stored.every(s => s.jpeg && s.size <= 2 * 1024 * 1024), 'photos stored as JPEG within the size limit');
+  check(stored.every(s => !s.gps), 'location metadata removed before upload');
+
+  // Viewer and delete.
+  await page.click('#bvPhotos button:nth-child(1)');
+  await page.waitForSelector('#photoDialog[open]');
+  check((await page.textContent('#pvTitle')).includes('photo 1 of 2'), 'tapping a photo opens the viewer');
+  await page.waitForFunction(() => document.getElementById('pvImage').naturalWidth > 0);
+  await page.click('#pvDelete');
+  await page.waitForFunction(() => !document.getElementById('photoDialog').open &&
+    document.querySelectorAll('#bvPhotos img').length === 1);
+  check(alerts.some(a => a.includes('Delete this photo?')), 'deleting a photo asks first');
+  await page.click('#bvClose');
+  check((await page.textContent('#boxTable')).includes('1 photo'), 'box list shows the photo count');
+
+  // Add photos from the Add box form, picking more than fit.
+  const six = [];
+  for (let i = 0; i < 6; i++) six.push(file('p' + i + '.jpg', await makePhoto(800, 600, i * 50)));
+  await page.fill('#boxNumber', '50');
+  await page.fill('#boxLocation', 'Old apartment');
+  await page.fill('#boxContents', 'Camera gear');
+  await page.setInputFiles('#formPhotoInput', six);
+  await page.waitForFunction(() => document.querySelectorAll('#formPhotos .photo-tile').length === 5 &&
+    !document.getElementById('saveBtn').disabled);
+  check(alerts.some(a => a.includes('Only 5 more photos fit')), 'photos beyond 5 are left out with a message');
+  check(await page.isDisabled('#formAddPhotoBtn'), 'Add photos is disabled at 5');
+  await page.click('#formPhotos .photo-tile:nth-child(5) .photo-remove');
+  check((await page.$$('#formPhotos .photo-tile')).length === 4 && !(await page.isDisabled('#formAddPhotoBtn')),
+        'removing a pending photo frees a slot');
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => [...document.querySelectorAll('#boxTable tr')]
+    .some(tr => tr.textContent.includes('#50') && tr.textContent.includes('4 photos')));
+  check((await page.$$('#formPhotos .photo-tile')).length === 0, 'box saved with 4 photos and the form cleared');
+
+  // Edit: remove one existing photo and add one new one; both apply on save.
+  const box50 = await page.evaluate(async () =>
+    (await (await fetch('/api/boxes')).json()).boxes.find(b => b.number === 50));
+  await page.click('#boxTable tr:has-text("#50") button:has-text("Edit")');
+  await page.waitForFunction(() => document.querySelectorAll('#formPhotos .photo-tile').length === 4);
+  await page.click('#formPhotos .photo-tile:nth-child(1) .photo-remove');
+  await page.setInputFiles('#formPhotoInput', [six[5]]);
+  await page.waitForFunction(() => document.querySelectorAll('#formPhotos .photo-tile').length === 4 &&
+    !document.getElementById('saveBtn').disabled);
+  await page.click('#saveBtn');
+  await page.waitForFunction(() => document.getElementById('formTitle').textContent === 'Add box');
+  const edited = await boxById(box50.id);
+  check(edited.photos.length === 4 && !edited.photos.some(p => p.id === box50.photos[0].id) &&
+        edited.photos[3].id !== box50.photos[3].id, 'editing removes and adds photos on save');
+
+  // Full backup: download the zip, change things, restore it.
+  await page.click('#exportBtn');
+  await page.waitForSelector('#exportDialog[open]');
+  const [zipDownload] = await Promise.all([page.waitForEvent('download'),
+    page.click('#exportDialog button[value="export"]')]);
+  const zipPath = path.join(OUT_DIR, 'backup-with-photos.zip');
+  await zipDownload.saveAs(zipPath);
+  check(zipDownload.suggestedFilename().endsWith('-with-photos.zip'), 'full backup downloads as a zip');
+  await page.click('#exportBtn');
+  await page.check('input[name="exportKind"][value="json"]');
+  const [jsonDownload] = await Promise.all([page.waitForEvent('download'),
+    page.click('#exportDialog button[value="export"]')]);
+  check(jsonDownload.suggestedFilename().endsWith('.json'), 'boxes-only backup still downloads as JSON');
+
+  await page.click('#boxTable tr:has-text("#50") button:has-text("Delete")');
+  await page.waitForFunction(() => !document.getElementById('boxTable').textContent.includes('#50'));
+  await page.setInputFiles('#importFile', zipPath);
+  await page.waitForFunction(() => document.getElementById('boxTable').textContent.includes('#50'));
+  check(alerts.some(a => a.includes('Restored 5 box(es) and 5 photos.')), 'restoring the zip brings back boxes and photos');
+  const restored = await boxById(box50.id);
+  check(JSON.stringify(restored.photos) === JSON.stringify(edited.photos), 'restored box has the same photos');
+
   // Sign out.
   await page.click('#logoutBtn');
   await page.waitForSelector('#loginView:not([hidden])');
