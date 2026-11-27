@@ -4,6 +4,7 @@ Run from the project root:  python3 -m unittest discover -s tests -v
 """
 
 import http.client
+import io
 import json
 import os
 import sqlite3
@@ -11,6 +12,8 @@ import sys
 import tempfile
 import threading
 import unittest
+import zipfile
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
@@ -18,6 +21,9 @@ import server  # noqa: E402
 
 PASSWORD = "correct-horse-battery"
 CSRF = {"X-Requested-With": "packing-tracker"}
+# The server only checks the JPEG signature; real decoding happens in the browser.
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + bytes(range(256)) * 4 + b"\xff\xd9"
+JPEG2 = b"\xff\xd8\xff\xe1" + b"second photo" * 50 + b"\xff\xd9"
 
 
 class ServerTestCase(unittest.TestCase):
@@ -35,6 +41,14 @@ class ServerTestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def request(self, method, path, body=None, headers=None, raw_body=None, cookie=True):
+        res, data = self.request_bytes(method, path, body, headers, raw_body, cookie)
+        parsed = None
+        if res.getheader("Content-Type", "").startswith("application/json") and data:
+            parsed = json.loads(data)
+        return res, parsed
+
+    def request_bytes(self, method, path, body=None, headers=None, raw_body=None, cookie=True):
+        """Like request(), but returns the raw response body."""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         hdrs = dict(CSRF)
         payload = raw_body
@@ -49,10 +63,7 @@ class ServerTestCase(unittest.TestCase):
         res = conn.getresponse()
         data = res.read()
         conn.close()
-        parsed = None
-        if res.getheader("Content-Type", "").startswith("application/json") and data:
-            parsed = json.loads(data)
-        return res, parsed
+        return res, data
 
     def login(self, password=PASSWORD):
         res, data = self.request("POST", "/api/login", {"password": password})
@@ -286,7 +297,317 @@ class BoxTests(ServerTestCase):
         self.assertEqual(data["boxes"][0]["location"], "x'); DROP TABLE boxes;--")
 
 
+class PhotoTestCase(ServerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.login()
+        self.box = self.add_box(1)[1]["box"]
+
+    def upload(self, box_id=None, data=JPEG, content_type="image/jpeg", headers=None):
+        hdrs = {"Content-Type": content_type}
+        hdrs.update(headers or {})
+        return self.request("POST", "/api/boxes/%s/photos" % (box_id or self.box["id"]),
+                            raw_body=data, headers=hdrs)
+
+    def box_photos(self, number=1):
+        _, data = self.request("GET", "/api/boxes")
+        return next(b for b in data["boxes"] if b["number"] == number)["photos"]
+
+    def photo_rows(self):
+        conn = sqlite3.connect(os.path.join(self.tmp.name, "tracker.db"))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+        finally:
+            conn.close()
+
+
+class PhotoTests(PhotoTestCase):
+    def test_upload_view_and_delete(self):
+        res, data = self.upload()
+        self.assertEqual(res.status, 201)
+        photo = data["photo"]
+        self.assertEqual(set(photo), {"id", "added"})
+        self.assertEqual(self.box_photos(), [photo])
+        res, body = self.request_bytes("GET", "/api/photos/" + photo["id"])
+        self.assertEqual(res.status, 200)
+        self.assertEqual(res.getheader("Content-Type"), "image/jpeg")
+        self.assertEqual(res.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(res.getheader("Cache-Control"), "no-store")
+        self.assertEqual(body, JPEG)
+        res, data = self.request("DELETE", "/api/photos/" + photo["id"])
+        self.assertEqual((res.status, data), (200, {"deleted": photo["id"]}))
+        self.assertEqual(self.box_photos(), [])
+        self.assertEqual(self.request("GET", "/api/photos/" + photo["id"])[0].status, 404)
+        self.assertEqual(self.request("DELETE", "/api/photos/" + photo["id"])[0].status, 404)
+
+    def test_photos_listed_in_upload_order(self):
+        ids = [self.upload(data=d)[1]["photo"]["id"] for d in (JPEG, JPEG2, JPEG)]
+        self.assertEqual([p["id"] for p in self.box_photos()], ids)
+
+    def test_photos_need_login(self):
+        photo_id = self.upload()[1]["photo"]["id"]
+        self.cookie = None
+        self.assertEqual(self.upload()[0].status, 401)
+        self.assertEqual(self.request("GET", "/api/photos/" + photo_id)[0].status, 401)
+        self.assertEqual(self.request("DELETE", "/api/photos/" + photo_id)[0].status, 401)
+
+    def test_photo_writes_need_csrf_header(self):
+        self.assertEqual(self.upload(headers={"X-Requested-With": ""})[0].status, 403)
+        photo_id = self.upload()[1]["photo"]["id"]
+        res, _ = self.request("DELETE", "/api/photos/" + photo_id, headers={"X-Requested-With": ""})
+        self.assertEqual(res.status, 403)
+        self.assertEqual(len(self.box_photos()), 1)
+
+    def test_upload_validation(self):
+        self.assertEqual(self.upload(content_type="image/png")[0].status, 415)
+        self.assertEqual(self.upload(content_type="application/json")[0].status, 415)
+        res, data = self.upload(data=b"<svg onload=alert(1)></svg>")
+        self.assertEqual(res.status, 400)
+        self.assertIn("JPEG", data["error"])
+        self.assertEqual(self.upload(data=b"")[0].status, 400)
+        res, _ = self.upload(data=b"\xff", headers={"Content-Length": str(server.MAX_PHOTO_BYTES + 1)})
+        self.assertEqual(res.status, 413)
+        self.assertEqual(self.box_photos(), [])
+
+    def test_largest_allowed_photo_accepted(self):
+        biggest = server.JPEG_MAGIC + b"\x00" * (server.MAX_PHOTO_BYTES - len(server.JPEG_MAGIC))
+        res, data = self.upload(data=biggest)
+        self.assertEqual(res.status, 201)
+        _, body = self.request_bytes("GET", "/api/photos/" + data["photo"]["id"])
+        self.assertEqual(body, biggest)
+
+    def test_unknown_box_photo_and_methods(self):
+        self.assertEqual(self.upload(box_id="no-such-box")[0].status, 404)
+        self.assertEqual(self.request("GET", "/api/photos/no-such-photo")[0].status, 404)
+        self.assertEqual(self.request("GET", "/api/photos/bad%20id")[0].status, 404)
+        self.assertEqual(self.request("PUT", "/api/photos/some-photo", {"x": 1})[0].status, 405)
+        self.assertEqual(self.request("GET", "/api/boxes/%s/photos" % self.box["id"])[0].status, 405)
+
+    def test_at_most_five_photos_per_box(self):
+        for _ in range(server.MAX_PHOTOS_PER_BOX):
+            self.assertEqual(self.upload()[0].status, 201)
+        res, data = self.upload()
+        self.assertEqual(res.status, 409)
+        self.assertIn("already has 5 photos", data["error"])
+        other = self.add_box(2)[1]["box"]
+        self.assertEqual(self.upload(box_id=other["id"])[0].status, 201)
+
+    def test_concurrent_uploads_respect_the_limit(self):
+        results = []
+
+        def worker():
+            results.append(self.upload()[0].status)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results), [201] * server.MAX_PHOTOS_PER_BOX + [409] * 3)
+        self.assertEqual(self.photo_rows(), server.MAX_PHOTOS_PER_BOX)
+
+    def test_photos_do_not_cause_edit_conflicts(self):
+        self.upload()
+        _, data = self.request("GET", "/api/boxes")
+        self.assertEqual(data["boxes"][0]["rev"], 1)
+        # A device that opened the edit form before the photo was added can still save.
+        res, data = self.request("PUT", "/api/boxes/" + self.box["id"],
+                                 {"number": 1, "location": "Truck", "rev": 1})
+        self.assertEqual(res.status, 200)
+        self.assertEqual(len(data["box"]["photos"]), 1)
+
+    def test_deleting_a_box_deletes_its_photos(self):
+        photo_id = self.upload()[1]["photo"]["id"]
+        self.assertEqual(self.request("DELETE", "/api/boxes/" + self.box["id"])[0].status, 200)
+        self.assertEqual(self.request("GET", "/api/photos/" + photo_id)[0].status, 404)
+        self.assertEqual(self.photo_rows(), 0)
+
+    def test_json_import_keeps_photos_of_boxes_in_the_file(self):
+        kept = self.upload()[1]["photo"]
+        other = self.add_box(2)[1]["box"]
+        self.upload(box_id=other["id"])
+        _, exported = self.request("GET", "/api/export")
+        self.assertNotIn("photos", exported["boxes"][0])  # JSON backup format is unchanged
+        exported["boxes"] = [b for b in exported["boxes"] if b["number"] == 1]
+        res, data = self.request("POST", "/api/import", exported)
+        self.assertEqual((res.status, data["imported"], data["photosRemoved"]), (200, 1, 1))
+        self.assertEqual(self.box_photos(), [kept])
+        self.assertEqual(self.photo_rows(), 1)
+
+
+class FullBackupTests(PhotoTestCase):
+    def restore(self, body, content_type="application/zip", headers=None):
+        hdrs = {"Content-Type": content_type}
+        hdrs.update(headers or {})
+        return self.request("POST", "/api/import/full", raw_body=body, headers=hdrs)
+
+    @staticmethod
+    def make_zip(manifest, files=None):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            if manifest is not None:
+                zf.writestr("backup.json", manifest if isinstance(manifest, bytes) else json.dumps(manifest))
+            for name, data in (files or {}).items():
+                zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+        return buf.getvalue()
+
+    def numbers(self):
+        _, data = self.request("GET", "/api/boxes")
+        return [b["number"] for b in data["boxes"]]
+
+    def test_round_trip_restores_boxes_and_photos(self):
+        self.request("PUT", "/api/boxes/" + self.box["id"],
+                     {"number": 1, "location": "Truck", "room": "Kitchen", "fragile": True, "rev": 1})
+        box2 = self.add_box(2)[1]["box"]
+        p1 = self.upload(data=JPEG)[1]["photo"]
+        p2 = self.upload(data=JPEG2)[1]["photo"]
+        p3 = self.upload(box_id=box2["id"])[1]["photo"]
+
+        res, body = self.request_bytes("GET", "/api/export/full")
+        self.assertEqual(res.status, 200)
+        self.assertEqual(res.getheader("Content-Type"), "application/zip")
+        self.assertIn('-with-photos.zip"', res.getheader("Content-Disposition"))
+        zf = zipfile.ZipFile(io.BytesIO(body))
+        self.assertIsNone(zf.testzip())
+        self.assertEqual(sorted(zf.namelist()),
+                         sorted(["backup.json"] + ["photos/%s.jpg" % p["id"] for p in (p1, p2, p3)]))
+        self.assertEqual(zf.getinfo("photos/%s.jpg" % p1["id"]).compress_type, zipfile.ZIP_STORED)
+        manifest = json.loads(zf.read("backup.json"))
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["boxes"][0]["photos"],
+                         [{"id": p["id"], "added": p["added"], "file": "photos/%s.jpg" % p["id"]}
+                          for p in (p1, p2)])
+
+        # Change everything, then restore.
+        self.request("DELETE", "/api/boxes/" + self.box["id"])
+        box3 = self.add_box(3)[1]["box"]
+        self.upload(box_id=box3["id"])
+        res, data = self.restore(body)
+        self.assertEqual(res.status, 200)
+        self.assertEqual(data, {"imported": 2, "skipped": 0, "photos": 3, "photosSkipped": 0})
+        _, listed = self.request("GET", "/api/boxes")
+        self.assertEqual([b["number"] for b in listed["boxes"]], [1, 2])
+        first = listed["boxes"][0]
+        self.assertEqual((first["id"], first["room"], first["location"], first["fragile"]),
+                         (self.box["id"], "Kitchen", "Truck", True))
+        self.assertEqual(first["photos"], [p1, p2])
+        self.assertEqual(self.request_bytes("GET", "/api/photos/" + p2["id"])[1], JPEG2)
+        self.assertEqual(self.photo_rows(), 3)  # box 3's photo went with box 3
+
+        # The backup.json inside the zip also works as a plain JSON backup.
+        res, data = self.request("POST", "/api/import", manifest)
+        self.assertEqual((res.status, data["imported"], data["photosRemoved"]), (200, 2, 0))
+
+    def test_empty_tracker_round_trip(self):
+        self.request("DELETE", "/api/boxes/" + self.box["id"])
+        res, body = self.request_bytes("GET", "/api/export/full")
+        self.assertEqual(res.status, 200)
+        res, data = self.restore(body)
+        self.assertEqual((res.status, data["imported"], data["photos"]), (200, 0, 0))
+
+    def test_head_request_sends_no_body(self):
+        res, body = self.request_bytes("HEAD", "/api/export/full")
+        self.assertEqual((res.status, res.getheader("Content-Type"), body), (200, "application/zip", b""))
+
+    def test_full_backup_needs_login(self):
+        _, body = self.request_bytes("GET", "/api/export/full")
+        self.cookie = None
+        self.assertEqual(self.request("GET", "/api/export/full")[0].status, 401)
+        self.assertEqual(self.restore(body)[0].status, 401)
+
+    def test_restore_request_checks(self):
+        _, body = self.request_bytes("GET", "/api/export/full")
+        self.assertEqual(self.restore(body, headers={"X-Requested-With": ""})[0].status, 403)
+        self.assertEqual(self.restore(body, content_type="application/octet-stream")[0].status, 415)
+        self.assertEqual(self.restore(b"")[0].status, 400)
+        res, _ = self.restore(b"P", headers={"Content-Length": str(server.MAX_BACKUP_ZIP_BYTES + 1)})
+        self.assertEqual(res.status, 413)
+        self.assertEqual(self.numbers(), [1])
+
+    def test_rejects_files_that_are_not_backups(self):
+        cases = [
+            (b"this is not a zip", "damaged or is not"),
+            (self.make_zip(None, {"notes.txt": b"hi"}), "backup.json is missing"),
+            (self.make_zip(b"{not json"), "not valid JSON"),
+            (self.make_zip({"nope": True}), "does not look like"),
+        ]
+        for body, message in cases:
+            res, data = self.restore(body)
+            self.assertEqual(res.status, 400, message)
+            self.assertIn(message, data["error"])
+        self.assertEqual(self.numbers(), [1])
+
+    def test_damaged_backup_changes_nothing(self):
+        photo = self.upload()[1]["photo"]
+        _, body = self.request_bytes("GET", "/api/export/full")
+        # Photos are stored uncompressed, so flipping a byte inside one breaks its checksum.
+        at = body.index(JPEG) + 100
+        damaged = body[:at] + bytes([body[at] ^ 0xFF]) + body[at + 1:]
+        self.add_box(2)
+        res, data = self.restore(damaged)
+        self.assertEqual(res.status, 400)
+        self.assertIn("Nothing was changed", data["error"])
+        self.assertEqual(self.numbers(), [1, 2])
+        self.assertEqual(self.box_photos(), [photo])
+
+    def test_bad_photo_entries_are_skipped(self):
+        oversized = server.JPEG_MAGIC + b"\x00" * server.MAX_PHOTO_BYTES
+        manifest = {"version": 2, "boxes": [
+            {"id": "box-a", "number": 1, "location": "Truck", "contents": ["A"], "photos": [
+                {"id": "p1", "file": "photos/p1.jpg", "added": "2026-01-01T00:00:00+00:00"},
+                {"id": "p2", "file": "photos/missing.jpg"},
+                {"id": "p3", "file": "photos/p3.jpg"},
+                {"id": "p4", "file": "../../etc/passwd"},
+                {"id": "p5", "file": "photos/big.jpg"},
+                "not an object",
+            ]},
+            {"id": "box-b", "number": 2, "location": "Truck", "photos": [
+                {"id": "dup", "file": "photos/b.jpg", "added": "yesterday"} for _ in range(7)]},
+            {"id": "box-c", "number": 3, "location": "Truck", "photos": "not a list"},
+        ]}
+        files = {"photos/p1.jpg": JPEG, "photos/p3.jpg": b"GIF89a not a jpeg",
+                 "photos/big.jpg": oversized, "photos/b.jpg": JPEG2}
+        res, data = self.restore(self.make_zip(manifest, files))
+        self.assertEqual(res.status, 200)
+        # Skipped: missing file, not a JPEG, unsafe name, too large, not an object, 2 over the limit.
+        self.assertEqual(data, {"imported": 3, "skipped": 0, "photos": 6, "photosSkipped": 7})
+        self.assertEqual(self.box_photos(1), [{"id": "p1", "added": "2026-01-01T00:00:00+00:00"}])
+        box_b = self.box_photos(2)
+        self.assertEqual(len(box_b), server.MAX_PHOTOS_PER_BOX)
+        self.assertEqual(box_b[0]["id"], "dup")
+        self.assertEqual(len({p["id"] for p in box_b}), len(box_b))  # duplicate ids replaced
+        datetime.fromisoformat(box_b[0]["added"])  # "yesterday" replaced with a real time
+        self.assertEqual(self.box_photos(3), [])
+
+
 class PersistenceTests(unittest.TestCase):
+    def test_upgrades_version_1_database_keeping_boxes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "tracker.db")
+            conn = sqlite3.connect(db)
+            conn.executescript(server.MIGRATIONS[0] + "PRAGMA user_version = 1;")
+            conn.execute("INSERT INTO boxes (id, number, location, room, contents, notes, fragile, "
+                         "open_first, rev, updated) VALUES ('old-box', 7, 'Truck', 'Office', "
+                         "'[\"Files\"]', 'Heavy', 1, 0, 3, '2026-01-01T00:00:00+00:00')")
+            conn.commit()
+            conn.close()
+
+            store = server.Store(db)
+            self.assertEqual(store.list_boxes(), [{
+                "id": "old-box", "number": 7, "location": "Truck", "room": "Office",
+                "contents": ["Files"], "notes": "Heavy", "fragile": True, "openFirst": False,
+                "rev": 3, "updated": "2026-01-01T00:00:00+00:00", "photos": []}])
+            conn = sqlite3.connect(db)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertIsNotNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'photos'").fetchone())
+            conn.close()
+
+            _, photo = store.add_photo("old-box", JPEG)
+            reopened = server.Store(db)  # opening an upgraded database again changes nothing
+            self.assertEqual(reopened.list_boxes()[0]["photos"], [photo])
+            self.assertEqual(reopened.get_photo(photo["id"]), JPEG)
+
     def test_data_and_sessions_survive_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "tracker.db")
