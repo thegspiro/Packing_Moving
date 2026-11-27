@@ -212,6 +212,11 @@
   #boxDialog .bv-move { display: flex; flex-wrap: wrap; gap: 8px; }
   #boxDialog .bv-move button { padding: 12px 14px; font-size: 1rem; }
   #boxDialog .bv-move-other { display: flex; gap: 8px; margin-top: 8px; }
+  #boxDialog .bv-link { display: flex; gap: 8px; }
+  #boxDialog .bv-link input { flex: 1 1 auto; min-width: 0; }
+  #boxDialog .bv-link button { flex: 0 0 auto; white-space: nowrap; }
+  #boxDialog .bv-link-status { margin-top: 6px; }
+  #boxDialog .bv-link-status.warn { color: #b42318; }
   #boxDialog ul { margin: 0; padding-left: 1.2em; font-size: 1.05rem; line-height: 1.5; }
   #boxDialog .bv-moved { color: #067647; font-weight: 600; margin-top: 8px; min-height: 1.2em; }
   #boxDialog .actions {
@@ -376,6 +381,14 @@
   <div class="bv-section" id="bvNotesSection">
     <h4>Notes</h4>
     <div id="bvNotes"></div>
+  </div>
+  <div class="bv-section">
+    <h4>Link for NFC tags</h4>
+    <div class="bv-link">
+      <input type="text" id="bvLink" readonly aria-label="Link to this box" aria-describedby="bvLinkStatus">
+      <button type="button" id="bvCopyLink">Copy link</button>
+    </div>
+    <div class="hint bv-link-status" id="bvLinkStatus" role="status"></div>
   </div>
   <div class="actions">
     <button type="button" id="bvEdit">Edit</button>
@@ -1129,6 +1142,65 @@
 
     $("bvNotesSection").hidden = !box.notes;
     $("bvNotes").textContent = box.notes;
+    $("bvLink").value = boxUrl(box);
+  }
+
+  var LINK_HINT = "Write this same link to every tag on this box, e.g. one on each side.";
+
+  function setLinkStatus(text, warn) {
+    var status = $("bvLinkStatus");
+    status.textContent = text;
+    status.classList.toggle("warn", !!warn);
+  }
+
+  function linkHint() {
+    if (qrBaseIsLocal()) {
+      return { text: "This link points to " + qrBase() + ", which phones can't open. Set PUBLIC_URL " +
+                     "in the container settings, or open the tracker using the server's network address.",
+               warn: true };
+    }
+    return { text: LINK_HINT, warn: false };
+  }
+
+  function resetLinkStatus() {
+    var hint = linkHint();
+    setLinkStatus(hint.text, hint.warn);
+  }
+
+  function selectLinkField() {
+    var input = $("bvLink");
+    input.focus();
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+  }
+
+  // The async clipboard API only exists on HTTPS or localhost. On a plain-HTTP home network,
+  // fall back to the older copy command on the selected field.
+  function copyLinkText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      selectLinkField();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+      if (ok) resolve(); else reject(new Error("copy command not available"));
+    });
+  }
+
+  function copyBoxLink() {
+    var text = $("bvLink").value;
+    if (!text) return;
+    copyLinkText(text)
+      .then(function () {
+        var hint = linkHint();
+        setLinkStatus("\u2713 Link copied. " + hint.text, hint.warn);
+      })
+      .catch(function (err) {
+        console.warn("Packing Tracker: could not copy the link", err);
+        selectLinkField();
+        setLinkStatus("Couldn't copy automatically. The link is selected: press and hold it, then choose Copy.", true);
+      });
   }
 
   function showBoxView(id) {
@@ -1136,6 +1208,7 @@
     $("bvMoved").textContent = "";
     $("bvMoveOther").value = "";
     renderBoxView();
+    resetLinkStatus();
     var dialog = $("boxDialog");
     if (!dialog.open) {
       if (typeof dialog.showModal === "function") dialog.showModal();
@@ -1176,6 +1249,7 @@
     clearHash();
   });
   $("bvClose").addEventListener("click", closeBoxView);
+  $("bvCopyLink").addEventListener("click", copyBoxLink);
   $("bvMoveOtherBtn").addEventListener("click", function () {
     if (viewedBoxId) quickMove(viewedBoxId, $("bvMoveOther").value);
   });

@@ -144,6 +144,37 @@ function check(cond, msg) {
   await page.click('#bvMoveOtherBtn');
   await page.waitForFunction(() => document.getElementById('bvLocation').textContent === 'Now at: Garage');
   check(true, 'move to a typed location works');
+
+  // Link for NFC tags: shows the box's link and copies it.
+  check(await page.inputValue('#bvLink') === BASE_URL + '/#box=' + ids[3], 'box view shows the link for NFC tags');
+  // The test server runs on 127.0.0.1, which phones can't reach, so the box view must say so.
+  check((await page.textContent('#bvLinkStatus')).includes("phones can't open") &&
+        await page.evaluate(() => document.getElementById('bvLinkStatus').classList.contains('warn')),
+        'box view warns that a localhost link will not work on phones');
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE_URL });
+  await page.click('#bvCopyLink');
+  await page.waitForFunction(() => document.getElementById('bvLinkStatus').textContent.includes('Link copied'));
+  check(await page.evaluate(() => navigator.clipboard.readText()) === BASE_URL + '/#box=' + ids[3],
+        'Copy link puts the link on the clipboard');
+  // Plain-HTTP home network: no async clipboard API, so the old copy command is used.
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    window.__copyResult = true;
+    document.execCommand = cmd => cmd === 'copy' && window.__copyResult;
+  });
+  await page.evaluate(() => { document.getElementById('bvLinkStatus').textContent = ''; });
+  await page.click('#bvCopyLink');
+  await page.waitForFunction(() => document.getElementById('bvLinkStatus').textContent.includes('Link copied'));
+  check(true, 'Copy link falls back to the copy command without the clipboard API');
+  await page.evaluate(() => { window.__copyResult = false; });
+  await page.click('#bvCopyLink');
+  await page.waitForFunction(() => document.getElementById('bvLinkStatus').textContent.includes("Couldn't copy"));
+  const selected = await page.evaluate(() => {
+    const f = document.getElementById('bvLink');
+    return document.activeElement === f && f.selectionStart === 0 && f.selectionEnd === f.value.length;
+  });
+  check(selected, 'when copying fails the link is selected for a manual copy');
+
   await page.click('#bvClose');
   await page.waitForFunction(() => window.location.hash === '' && !document.getElementById('boxDialog').open,
                              null, { timeout: 2000 });
@@ -157,6 +188,11 @@ function check(cond, msg) {
   await phone.click('#loginBtn');
   await phone.waitForSelector('#boxDialog[open]');
   check((await phone.textContent('#bvTitle')) === 'Box 1024', 'scan link survives signing in on a phone');
+  const phoneLink = await phone.evaluate(() => {
+    const r = document.getElementById('bvCopyLink').getBoundingClientRect();
+    return { right: r.right, vw: document.documentElement.clientWidth };
+  });
+  check(phoneLink.right <= phoneLink.vw, 'Copy link button fits a phone screen');
   await phone.screenshot({ path: path.join(OUT_DIR, 'phone-box-view.png') });
 
   // The box list must fit a phone screen: no sideways scrolling, every button and field reachable.
