@@ -226,6 +226,28 @@ break its label. If you change `PUBLIC_URL` (for example a new server IP),
 reprint the labels. Labels printed before QR codes were added still work; they
 just have no code.
 
+## NFC tags
+
+An NFC sticker on a box works like its QR code: tapping it with a phone opens
+that box in the tracker. Nothing extra is installed on the server.
+
+1. Open the box (the **View** button in the list, or scan its QR code).
+2. Under **Link for NFC tags**, tap **Copy link**. If copying isn't allowed
+   (some browsers block it on plain `http://` addresses), the link is selected
+   instead: press and hold it and choose **Copy**.
+3. In an NFC writing app (for example *NFC Tools*), write a **URL** record with
+   that link to the sticker. NTAG213 or larger stickers have enough room.
+
+To put tags on more than one side of a box, write the **same link** to each
+tag. There is nothing to register or assign, and a lost or replaced tag needs
+no clean-up. Set **Public URL** first, as for QR codes; the box view warns you
+when the link points to an address phones can't open. Android phones open the
+link when the screen is unlocked; iPhones (XS or newer) show a banner to tap.
+Keep stickers away from foil or metal, which blocks them.
+
+A tag holds only the box's link, which is a random ID, not its contents. Anyone
+who taps it still has to sign in to see what's inside.
+
 ## Photos
 
 Each box can have up to 5 photos of its contents — handy for finding things
